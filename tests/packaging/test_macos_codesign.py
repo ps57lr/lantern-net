@@ -461,7 +461,7 @@ def test_staple_validation_failure_is_fatal(
     assert calls == [["/usr/bin/stapler", "validate", "-v", str(app)]]
 
 
-def test_gatekeeper_requires_notarized_developer_id_source_and_pinned_origin(
+def test_gatekeeper_accepts_real_notarized_output_without_optional_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     app = _app(tmp_path)
@@ -479,7 +479,7 @@ def test_gatekeeper_requires_notarized_developer_id_source_and_pinned_origin(
             command,
             0,
             stdout="",
-            stderr=f"accepted\nsource=Notarized Developer ID\norigin={EXPECTED_IDENTITY}\n",
+            stderr="accepted\nsource=Notarized Developer ID\n",
         )
 
     monkeypatch.setattr(macos_codesign, "_run_text", accepted)
@@ -494,5 +494,17 @@ def test_gatekeeper_requires_notarized_developer_id_source_and_pinned_origin(
         )
 
     monkeypatch.setattr(macos_codesign, "_run_text", wrong_source)
+    with pytest.raises(PackageVerificationError, match="Gatekeeper did not accept"):
+        macos_codesign.assess_gatekeeper(app)
+
+    def deceptive_source(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="accepted\nsource=Notarized Developer ID extra\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(macos_codesign, "_run_text", deceptive_source)
     with pytest.raises(PackageVerificationError, match="Gatekeeper did not accept"):
         macos_codesign.assess_gatekeeper(app)

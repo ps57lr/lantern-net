@@ -636,5 +636,9 @@ def assess_gatekeeper(path: Path) -> None:
         timeout=60,
     )
     details = f"{completed.stdout}\n{completed.stderr}"
-    if "source=Notarized Developer ID" not in details or EXPECTED_IDENTITY not in details:
+    # Current macOS releases do not consistently include an ``origin=`` line,
+    # even at verbose level 4.  Exact certificate, team, timestamp, Hardened
+    # Runtime, and CDHash policy is enforced immediately before this independent
+    # Gatekeeper assessment by ``verify_application_signatures``.
+    if "source=Notarized Developer ID" not in details.splitlines():
         raise PackageVerificationError("Gatekeeper did not accept the notarized Developer ID app")
