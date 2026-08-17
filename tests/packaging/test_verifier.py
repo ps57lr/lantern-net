@@ -210,7 +210,7 @@ def test_signed_payload_provenance_requires_exact_pins_and_tool_hashes() -> None
             "tree_sha256": digest,
         },
         "entitlements_sha256": ("97704a8960b4facceef54397a08fb5d0a456247c3627359215aa2a27df22656c"),
-        "runtime_lock_sha256": ("ab6582b81a411e0afeac0f5e9d8f06515f67915b2cdb6e58d7517c0f27df7c2a"),
+        "runtime_lock_sha256": ("523fde449f9e3587b2e662ad053b8bb5c99cb26139591fa1fd8113a22aa1e2b9"),
         "runtime_archive_sha256": (
             "7dc10e31eede05a6ab1ec9e0b961f521078b0959f838ed1d7452597d529ff802"
         ),
@@ -223,7 +223,7 @@ def test_signed_payload_provenance_requires_exact_pins_and_tool_hashes() -> None
         ),
         "runtime_tree_sha256": ("89f2b0d5e85dc62c5ec225dc850e097f863c7406d23a2835a4e983f050ee093d"),
         "build_site_packages_sha256": (
-            "d027604b53d335f21c22687cfa4e69d83c7a1468664ebbbe502f5377388bb5fd"
+            "c6f4d93a0091bc6d86b118dbb05b85af5209b30c5d4b4048fbf17fe052bcb33d"
         ),
         "certificate_common_name": "Developer ID Application: Matthew Buttrick (HY2MDL9DND)",
         "certificate_sha1": "DFE4DF368133715BAAE725CC68CC7BA8A7246BEB",

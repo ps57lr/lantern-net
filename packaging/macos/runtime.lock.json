@@ -2,7 +2,7 @@
   "architecture": "arm64",
   "archive": "cpython-3.11.15+20260728-aarch64-apple-darwin-install_only.tar.gz",
   "archive_sha256": "7dc10e31eede05a6ab1ec9e0b961f521078b0959f838ed1d7452597d529ff802",
-  "build_site_packages_sha256": "d027604b53d335f21c22687cfa4e69d83c7a1468664ebbbe502f5377388bb5fd",
+  "build_site_packages_sha256": "c6f4d93a0091bc6d86b118dbb05b85af5209b30c5d4b4048fbf17fe052bcb33d",
   "libpython": "python/lib/libpython3.11.dylib",
   "libpython_sha256": "39669f88807bff419376e0ba17ae68d194f065f7959fb61cd4777af65da09e51",
   "minimum_macos": "11.0",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import subprocess
 import sys
 import tarfile
@@ -77,6 +78,168 @@ def test_bytecode_removal_includes_sourceless_startup_cache(tmp_path: Path) -> N
     assert not sourceless.exists()
     assert not cache.exists()
     assert ordinary.is_file()
+
+
+def _build_environment_fixture(root: Path) -> tuple[Path, Path]:
+    runtime = root / "runtime" / "python"
+    executable = runtime / "bin" / "python3.11"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"reviewed python")
+    environment = root / "build-environment"
+    binary_directory = environment / "bin"
+    binary_directory.mkdir(parents=True)
+    (environment / "lib" / "python3.11" / "site-packages").mkdir(parents=True)
+    (binary_directory / "python").symlink_to("python3.11")
+    (binary_directory / "python3").symlink_to("python3.11")
+    (binary_directory / "python3.11").symlink_to(executable)
+    (environment / "pyvenv.cfg").write_text(
+        f"home = {executable.parent}\n"
+        "include-system-site-packages = false\n"
+        "version = 3.11.15\n"
+        f"executable = {executable}\n"
+        f"command = {executable} -m venv {environment}\n",
+        encoding="utf-8",
+    )
+    return environment, runtime
+
+
+def test_build_environment_canonicalization_removes_path_bound_launchers(
+    tmp_path: Path,
+) -> None:
+    digests: list[str] = []
+    for name in ("first-long-staging-name", "second"):
+        environment, runtime = _build_environment_fixture(tmp_path / name)
+        binary_directory = environment / "bin"
+        site_packages = environment / "lib" / "python3.11" / "site-packages"
+        dist_info = site_packages / "example-1.0.dist-info"
+        package = site_packages / "example"
+        dist_info.mkdir(parents=True)
+        package.mkdir()
+        (binary_directory / "example-tool").write_text(
+            f"#!{environment}/bin/python\n",
+            encoding="utf-8",
+        )
+        (package / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (dist_info / "RECORD").write_text(
+            "../../../bin/example-tool,sha256=" + "a" * 43 + ",123\n"
+            "example/__init__.py,,\n"
+            "example-1.0.dist-info/RECORD,,\n",
+            encoding="utf-8",
+        )
+
+        normalized = bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+        digests.append(bootstrap._canonical_tree_sha256(normalized))
+
+        assert {entry.name for entry in binary_directory.iterdir()} == {
+            "python",
+            "python3",
+            "python3.11",
+        }
+        assert (dist_info / "RECORD").read_text(encoding="utf-8") == (
+            "example/__init__.py,,\nexample-1.0.dist-info/RECORD,,\n"
+        )
+
+    assert digests[0] == digests[1]
+
+
+def test_build_environment_canonicalization_rejects_malformed_record(
+    tmp_path: Path,
+) -> None:
+    environment, runtime = _build_environment_fixture(tmp_path)
+    record = environment / "lib/python3.11/site-packages/example-1.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    record.write_text("../outside,,\n", encoding="utf-8")
+
+    with pytest.raises(bootstrap.BootstrapError, match="record path"):
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    ("../../../bin/../../outside", "../../../bin/python"),
+)
+def test_build_environment_rejects_unsafe_external_record_path(
+    tmp_path: Path,
+    unsafe_path: str,
+) -> None:
+    environment, runtime = _build_environment_fixture(tmp_path)
+    launcher = environment / "bin" / "tool"
+    launcher.write_text("tool\n", encoding="utf-8")
+    record = environment / "lib/python3.11/site-packages/example-1.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    record.write_text(f"{unsafe_path},,\nexample-1.0.dist-info/RECORD,,\n", encoding="utf-8")
+
+    with pytest.raises(bootstrap.BootstrapError, match="launcher path"):
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+
+
+def test_build_environment_rejects_launcher_or_configuration_substitution(
+    tmp_path: Path,
+) -> None:
+    environment, runtime = _build_environment_fixture(tmp_path / "launcher")
+    (environment / "bin" / "python3.11").unlink()
+    (environment / "bin" / "python3.11").symlink_to("/usr/bin/python3")
+
+    with pytest.raises(bootstrap.BootstrapError, match="Python launcher"):
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+
+    environment, runtime = _build_environment_fixture(tmp_path / "configuration")
+    configuration = environment / "pyvenv.cfg"
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8").replace(
+            "include-system-site-packages = false",
+            "include-system-site-packages = true",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(bootstrap.BootstrapError, match="Python configuration"):
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+
+
+def test_build_environment_rejects_linked_metadata_without_mutation(tmp_path: Path) -> None:
+    environment, runtime = _build_environment_fixture(tmp_path / "sealed")
+    launcher = environment / "bin" / "tool"
+    launcher.write_text("tool\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "example-1.0.dist-info"
+    outside.mkdir(parents=True)
+    record = outside / "RECORD"
+    original = "../../../bin/tool,,\nexample-1.0.dist-info/RECORD,,\n"
+    record.write_text(original, encoding="utf-8")
+    site_packages = environment / "lib/python3.11/site-packages"
+    (site_packages / "example-1.0.dist-info").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(bootstrap.BootstrapError, match="metadata directory"):
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+
+    assert launcher.read_text(encoding="utf-8") == "tool\n"
+    assert record.read_text(encoding="utf-8") == original
+
+
+def test_build_environment_replaces_record_without_mutating_external_hardlink(
+    tmp_path: Path,
+) -> None:
+    environment, runtime = _build_environment_fixture(tmp_path / "sealed")
+    launcher = environment / "bin" / "tool"
+    launcher.write_text("tool\n", encoding="utf-8")
+    outside = tmp_path / "outside-record"
+    original = "../../../bin/tool,,\nexample-1.0.dist-info/RECORD,,\n"
+    outside.write_text(original, encoding="utf-8")
+    dist_info = environment / "lib/python3.11/site-packages/example-1.0.dist-info"
+    dist_info.mkdir()
+    record = dist_info / "RECORD"
+    os.link(outside, record)
+    original_mode = record.stat().st_mode
+
+    previous_umask = os.umask(0o077)
+    try:
+        bootstrap.canonicalize_build_environment(environment, runtime=runtime)
+    finally:
+        os.umask(previous_umask)
+
+    assert outside.read_text(encoding="utf-8") == original
+    assert record.read_text(encoding="utf-8") == "example-1.0.dist-info/RECORD,,\n"
+    assert record.stat().st_mode == original_mode
 
 
 def test_isolated_release_loader_can_import_sibling_modules() -> None:
@@ -177,11 +340,32 @@ def test_run_release_seals_inputs_rechecks_source_and_uses_minimal_environment(
         calls.append((command, environment))
         if "venv" in command:
             build_environment = Path(command[-1])
-            (build_environment / "bin").mkdir(parents=True)
-            (build_environment / "bin" / "python").write_bytes(b"builder")
+            binary_directory = build_environment / "bin"
+            binary_directory.mkdir(parents=True)
+            executable = Path(command[0]).resolve()
+            (binary_directory / "python").symlink_to("python3.11")
+            (binary_directory / "python3").symlink_to("python3.11")
+            (binary_directory / "python3.11").symlink_to(executable)
+            (build_environment / "pyvenv.cfg").write_text(
+                f"home = {executable.parent}\n"
+                "include-system-site-packages = false\n"
+                "version = 3.11.15\n"
+                f"executable = {executable}\n"
+                f"command = {executable} -m venv {build_environment}\n",
+                encoding="utf-8",
+            )
         elif "pip" in command:
             site_packages = Path(command[0]).parents[1] / "lib" / "python3.11" / "site-packages"
             site_packages.mkdir(parents=True)
+            package = site_packages / "tool"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+            dist_info = site_packages / "tool-1.0.dist-info"
+            dist_info.mkdir()
+            (dist_info / "RECORD").write_text(
+                "tool/__init__.py,,\ntool-1.0.dist-info/RECORD,,\n",
+                encoding="utf-8",
+            )
 
     monkeypatch.setattr(bootstrap, "_run", run)
 
