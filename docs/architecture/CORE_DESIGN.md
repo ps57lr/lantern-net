@@ -368,7 +368,7 @@ example of a generation-only value):
 ```json
 {
   "schema_version": "1.1",
-  "tool_version": "0.3.0.dev1",
+  "tool_version": "0.3.0.dev3",
   "report_id": "report-87b1e3fb1354e9a95f032ad6e644b640",
   "hostname": "<device-1>",
   "os": {

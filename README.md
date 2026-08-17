@@ -21,6 +21,8 @@ The project also contains safety foundations for the intended future product. Th
 - A typed remediation planner and dry-run lifecycle. No real machine-changing repair is registered, and there is no `apply` command or credential collection.
 - Read-only rescue assessment models and reviewed manual guidance. Lantern does not currently boot a computer, enter Safe Mode or Recovery, repair a disk, unlock encrypted data, or determine hardware viability on its own.
 - Security building blocks for a future LAN support mode. Non-loopback serving is hard-disabled, so this build cannot expose Lantern to another device on the network.
+- A disabled, offline authorized-assessment envelope and coverage planner for defining written authority, exact private scope, exclusions, hard stops, technique budgets, vantage points, and data handling before any future scanner exists. It produces no evidence or compliance conclusion and is not wired to the CLI or UI.
+- A locked local-developer packaging pipeline for a visibly launched macOS app or Linux one-folder build. It verifies frozen assets offline and labels unsigned builds honestly; it is not yet a signed, notarized family handoff.
 
 There is no USB launcher or automatic execution in this build, and Windows diagnostic parity has not been implemented.
 
@@ -60,7 +62,7 @@ netdiag ui
 
 Lantern opens a private, temporary browser session on this computer. The launch link is single-use, the service listens only on loopback, and the process closes when the session ends or reaches its time limit. No check starts until you choose a profile and select **Start check**.
 
-The default profile only reads local route, interface, Wi-Fi, and neighbor state. **Include basic network checks** opts that one run into small public reachability, DNS, and gateway-service probes. A brief mDNS browse is a separate choice. The UI cannot sweep the LAN, accept credentials, apply fixes, expose remote access, or upload/share a report in this build.
+The default profile only reads local route, interface, Wi-Fi, and neighbor state. **Include basic network checks** opts that one run into small public reachability, DNS, and gateway-service probes. A brief mDNS browse is a separate choice. The UI cannot sweep the LAN, accept credentials, apply fixes, expose remote access, or upload a report. After a finished check, it can preview and explicitly download the same identifier-free, redacted presentation shown in the browser as a local JSON file. Lantern makes no network upload; browser, operating-system, backup, and sync behavior for the downloaded file is outside Lantern's control.
 
 ## Run and share a report
 
@@ -166,7 +168,7 @@ ruff format --check .
 
 Checks return structured findings and evidence instead of printing directly. This keeps collection separate from terminal presentation, JSON serialization, the future local UI, and any later consent-based support transport.
 
-Architecture and safety decisions are documented under [`docs/architecture`](docs/architecture). See [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged path from a dependable local utility to a consent-based product.
+Architecture and safety decisions are documented under [`docs/architecture`](docs/architecture). See the [assessment foundation](docs/architecture/ASSESSMENT_DESIGN.md), [packaging guide](docs/PACKAGING.md), [development release ledger](docs/RELEASES.md), and [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged path from a dependable local utility to a consent-based product.
 
 The repository also includes deterministic browser acceptance tests. They use a synthetic passive result through the real loopback/session/UI boundaries and do not run network collectors:
 
@@ -176,4 +178,4 @@ npx --no-install playwright install chromium
 npm run test:browser
 ```
 
-The browser matrix covers desktop, tablet, and phone layouts, keyboard/session lifecycle, local-origin enforcement, and automated WCAG A/AA checks. CI also tests Python 3.10, 3.11, and 3.14 and installs the built wheel into a clean environment.
+The browser matrix covers desktop, tablet, and phone layouts, keyboard/session lifecycle, local-origin enforcement, local report preview/download, and automated WCAG A/AA checks. CI runs the same matrix against source and an isolated built wheel, tests Python 3.10, 3.11, and 3.14, and inspects the packaged schema and assets.

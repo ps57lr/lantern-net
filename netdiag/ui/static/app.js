@@ -10,7 +10,6 @@
     "/api/session": Object.freeze(["GET"]),
     "/api/status": Object.freeze(["GET"]),
     "/api/status/events": Object.freeze(["GET"]),
-    "/api/report/export": Object.freeze(["GET"]),
     "/api/diagnostics/start": Object.freeze(["POST"]),
     "/api/diagnostics/cancel": Object.freeze(["POST"]),
     "/api/session/revoke": Object.freeze(["POST"]),
@@ -197,6 +196,7 @@
   let startInFlight = false;
   let cancelInFlight = false;
   let revokeInFlight = false;
+  let exportInFlight = false;
   let sessionCleared = false;
   let draftGoal = "problem";
   let draftBasic = false;
@@ -714,6 +714,7 @@
     startInFlight = false;
     cancelInFlight = false;
     revokeInFlight = false;
+    exportInFlight = false;
     pollInFlight = false;
     authenticated = false;
     csrfToken = null;
@@ -727,6 +728,7 @@
     runAnnouncement.textContent = "";
     showNotice(message, tone === "info" ? "info" : "attention");
     statusSnapshot = null;
+    syncCapabilityNavigation();
     if (closeOpenDrawer) {
       closeSidebar(true);
     }
@@ -916,8 +918,13 @@
     });
 
     source.addEventListener("close", function () {
-      if (statusStreamGeneration === generation) {
-        stopStatusStream();
+      if (!isCurrentSession(generation) || statusStreamGeneration !== generation) {
+        return;
+      }
+      const stillRunning = Boolean(statusSnapshot && statusSnapshot.state === "running");
+      stopStatusStream();
+      if (stillRunning) {
+        schedulePoll(POLL_RUNNING_MS, false, generation);
       }
     });
 
@@ -1565,39 +1572,40 @@
     );
   }
 
-  async function downloadReport() {
+  function downloadReport(trigger) {
+    if (exportInFlight) {
+      return;
+    }
     if (!statusSnapshot || !statusSnapshot.capabilities.share_export) {
       showNotice("Report export is available only after a finished check.", "attention");
       return;
     }
+    exportInFlight = true;
+    trigger.disabled = true;
+    trigger.textContent = "Preparing local file…";
     try {
-      const response = await apiFetch("/api/report/export", { method: "GET" });
-      if (response.status === 401) {
-        clearSession("The private local session expired. Launch Lantern again to continue.");
-        return;
-      }
-      if (!response.ok) {
-        const message = await failureMessage(response, "Lantern could not export the report.");
-        showNotice(message, "attention");
-        return;
-      }
-      const payload = await response.arrayBuffer();
-      if (payload.byteLength > MAX_JSON_BYTES) {
-        showNotice("The exported report exceeded the local size limit.", "attention");
-        return;
-      }
+      const exported = validateStatus(JSON.parse(JSON.stringify(statusSnapshot)));
+      const payload = JSON.stringify(exported, null, 2) + "\n";
       const blob = new Blob([payload], { type: "application/json" });
+      if (blob.size > MAX_JSON_BYTES) {
+        showNotice("The redacted report exceeded the local size limit.", "attention");
+        return;
+      }
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "lantern-report.json";
+      link.download = "lantern-report-" + exported.state + ".json";
       document.body.append(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
       showNotice("Redacted report downloaded to this computer. Nothing was uploaded.", "info");
     } catch (_error) {
-      showNotice("Lantern could not download the report.", "attention");
+      showNotice("Lantern could not create the local report.", "attention");
+    } finally {
+      exportInFlight = false;
+      trigger.disabled = false;
+      trigger.textContent = "Download reviewed JSON";
     }
   }
 
@@ -1609,11 +1617,28 @@
     const panel = createElement("section", "panel explanation-panel");
     panel.append(createIcon("share"), createElement("h2", "", "Download a redacted report"));
     if (statusSnapshot.capabilities.share_export) {
-      panel.append(createElement("p", "", "Export the same identifier-free presentation Lantern shows in the browser. The file stays on this computer; nothing is uploaded, emailed, or synced."));
-      const button = createElement("button", "primary-button", "Download redacted JSON");
+      panel.append(createElement("p", "", "Review the same identifier-free presentation Lantern shows in the browser before creating a local file. Lantern does not upload or transmit it; your browser, operating system, backup, or sync settings control what happens to downloaded files."));
+      const included = createElement("section", "report-boundary");
+      included.append(createElement("h3", "", "Included"));
+      included.append(createElement("p", "", "The selected goal and profile, run timing, diagnostic condition, confidence, coverage, safe findings and next steps, path and module summaries, and capability states."));
+      const excluded = createElement("section", "report-boundary");
+      excluded.append(createElement("h3", "", "Excluded"));
+      excluded.append(createElement("p", "", "Raw evidence, hostnames, Wi-Fi names, device identifiers, IP or MAC addresses, credentials, recovery keys, and native error text."));
+      panel.append(included, excluded);
+      panel.append(createElement("p", "report-warning", "This report may still reveal the selected goal, diagnostic condition, findings, and timing. Review it before sending it to anyone."));
+      const preview = document.createElement("details");
+      preview.className = "technical-disclosure report-preview";
+      const previewSummary = document.createElement("summary");
+      previewSummary.textContent = "Review redacted JSON";
+      const previewBody = createElement("pre", "report-preview-json", JSON.stringify(statusSnapshot, null, 2));
+      previewBody.tabIndex = 0;
+      previewBody.setAttribute("aria-label", "Share-safe report JSON preview");
+      preview.append(previewSummary, previewBody);
+      panel.append(preview);
+      const button = createElement("button", "primary-button", "Download reviewed JSON");
       button.type = "button";
       button.addEventListener("click", function () {
-        void downloadReport();
+        downloadReport(button);
       });
       panel.append(button);
     } else {
@@ -1623,7 +1648,7 @@
 
     const boundary = createElement("section", "panel safety-panel");
     boundary.append(createIcon("shield"), createElement("h2", "", "Local-only boundary"));
-    boundary.append(createElement("p", "", "Status remains on this computer. No external destination is configured."));
+    boundary.append(createElement("p", "", "Lantern has no external destination and does not upload this report. Download storage, backup, and synchronization are controlled outside Lantern."));
     fragment.append(boundary);
     return fragment;
   }

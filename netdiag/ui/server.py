@@ -51,6 +51,8 @@ _STATUS_STREAM_TIMEOUT_SECONDS: Final[float] = 30.0
 _STATUS_STREAM_MAX_SECONDS: Final[float] = 25.0
 _STATUS_STREAM_POLL_SECONDS: Final[float] = 0.35
 _STATUS_STREAM_HEARTBEAT_SECONDS: Final[float] = 2.0
+_STATUS_STREAM_GLOBAL_LIMIT: Final[int] = 4
+_STATUS_STREAM_PER_SESSION_LIMIT: Final[int] = 1
 _SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 3.0
 _MAX_LOCAL_LIFETIME_SECONDS: Final[float] = 20 * 60
 
@@ -76,7 +78,9 @@ class _StreamResponse:
     content_type: str
     headers: tuple[tuple[str, str], ...]
     timeout_seconds: float
-    writer: Callable[[object, LocalApplication], None]
+    session_id: str
+    writer: Callable[[object, LocalApplication, str], None]
+    after_stream: Callable[[], None]
 
 
 def _json_bytes(value: object) -> bytes:
@@ -177,6 +181,9 @@ class LocalApplication:
         self.on_revoke_written = on_revoke_written
         self.max_request_body = max_request_body
         self.max_response_body = max_response_body
+        self._status_stream_lock = threading.Lock()
+        self._status_streams: dict[bytes, int] = {}
+        self._status_stream_total = 0
 
     def dispatch(self, request: _LocalRequestHandler, *, head_only: bool = False) -> None:
         """Validate, route, and write exactly one normalized response."""
@@ -291,9 +298,11 @@ class LocalApplication:
             )
 
         if path == "/api/status":
-            if self.security.authenticate(self._session_cookie(request)) is None:
+            session_id = self._session_cookie(request)
+            if self.security.authenticate(session_id) is None:
                 return self._unauthorized(clear_cookie=True)
-            return self._status_response()
+            assert session_id is not None
+            return self._status_response(session_id)
 
         if path == "/api/status/events":
             if request.command == "HEAD":
@@ -303,8 +312,18 @@ class LocalApplication:
                     "That method is not available for the status stream route.",
                     headers=(("Allow", "GET"),),
                 )
-            if self.security.authenticate(self._session_cookie(request)) is None:
+            session_id = self._session_cookie(request)
+            if self.security.authenticate(session_id) is None:
                 return self._unauthorized(clear_cookie=True)
+            assert session_id is not None
+            release_stream = self._acquire_status_stream(session_id)
+            if release_stream is None:
+                return _error_response(
+                    429,
+                    "status_stream_busy",
+                    "The local status stream is already in use.",
+                    headers=(("Retry-After", "1"),),
+                )
             return _StreamResponse(
                 status=200,
                 content_type="text/event-stream; charset=utf-8",
@@ -313,20 +332,10 @@ class LocalApplication:
                     ("X-Content-Type-Options", "nosniff"),
                 ),
                 timeout_seconds=_STATUS_STREAM_TIMEOUT_SECONDS,
+                session_id=session_id,
                 writer=_write_status_event_stream,
+                after_stream=release_stream,
             )
-
-        if path == "/api/report/export":
-            if request.command == "HEAD":
-                return _error_response(
-                    405,
-                    "method_not_allowed",
-                    "That method is not available for the report export route.",
-                    headers=(("Allow", "GET"),),
-                )
-            if self.security.authenticate(self._session_cookie(request)) is None:
-                return self._unauthorized(clear_cookie=True)
-            return self._report_export_response()
 
         return _error_response(404, "route_not_found", "That local route does not exist.")
 
@@ -554,7 +563,7 @@ class LocalApplication:
             return {}, _error_response(400, "invalid_request", "A JSON object is required.")
         return value, None
 
-    def _status_response(self) -> _Response:
+    def _status_response(self, session_id: str) -> _Response:
         try:
             snapshot: Mapping[str, JsonValue] = self.status_provider.snapshot()
             if not isinstance(snapshot, Mapping):
@@ -571,47 +580,11 @@ class LocalApplication:
                 "status_unavailable",
                 "A safe status snapshot is not available.",
             )
+        # The provider may block while the session expires or is explicitly
+        # revoked. Never emit its snapshot under stale authority.
+        if self.security.authenticate(session_id) is None:
+            return self._unauthorized(clear_cookie=True)
         return _Response(200, body, "application/json; charset=utf-8")
-
-    def _report_export_response(self) -> _Response:
-        try:
-            snapshot: Mapping[str, JsonValue] = self.status_provider.snapshot()
-            if not isinstance(snapshot, Mapping):
-                raise TypeError("status snapshot must be a mapping")
-            state = snapshot.get("state")
-            capabilities = snapshot.get("capabilities")
-            if state not in {"completed", "cancelled", "failed"}:
-                return _error_response(
-                    409,
-                    "export_not_ready",
-                    "A finished diagnostic check is required before export.",
-                )
-            if not isinstance(capabilities, Mapping) or capabilities.get("share_export") is not True:
-                return _error_response(
-                    403,
-                    "export_unavailable",
-                    "Report export is not available for this session state.",
-                )
-            body = _json_bytes(snapshot)
-            if len(body) > self.max_response_body:
-                raise ValueError("export snapshot is too large")
-            self._reject_non_finite(snapshot)
-        except Exception:  # noqa: BLE001 - provider failures are a generic 503.
-            return _error_response(
-                503,
-                "export_unavailable",
-                "A safe report export is not available.",
-            )
-        filename = f"lantern-report-{state}.json"
-        return _Response(
-            200,
-            body,
-            "application/json; charset=utf-8",
-            headers=(
-                ("Content-Disposition", f'attachment; filename="{filename}"'),
-                ("Cache-Control", "no-store"),
-            ),
-        )
 
     @classmethod
     def _reject_non_finite(cls, value: object) -> None:
@@ -661,14 +634,52 @@ class LocalApplication:
             headers=headers,
         )
 
+    def _acquire_status_stream(self, session_id: str) -> Callable[[], None] | None:
+        """Acquire one bounded stream lease without retaining a raw session ID."""
 
-def _write_status_event_stream(stream: object, application: LocalApplication) -> None:
+        session_key = hashlib.sha256(session_id.encode("ascii", errors="strict")).digest()
+        with self._status_stream_lock:
+            per_session = self._status_streams.get(session_key, 0)
+            if (
+                self._status_stream_total >= _STATUS_STREAM_GLOBAL_LIMIT
+                or per_session >= _STATUS_STREAM_PER_SESSION_LIMIT
+            ):
+                return None
+            self._status_stream_total += 1
+            self._status_streams[session_key] = per_session + 1
+
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            with self._status_stream_lock:
+                if released:
+                    return
+                released = True
+                remaining = self._status_streams.get(session_key, 0) - 1
+                if remaining > 0:
+                    self._status_streams[session_key] = remaining
+                else:
+                    self._status_streams.pop(session_key, None)
+                self._status_stream_total = max(0, self._status_stream_total - 1)
+
+        return release
+
+
+def _write_status_event_stream(
+    stream: object,
+    application: LocalApplication,
+    session_id: str,
+) -> None:
     """Emit bounded same-origin status snapshots until the run reaches a terminal state."""
 
     started = time.monotonic()
     last_payload: bytes | None = None
     last_heartbeat = started
     while time.monotonic() - started < _STATUS_STREAM_MAX_SECONDS:
+        if application.security.authenticate(session_id) is None:
+            _write_sse_event(stream, event="close", data='{"reason":"session_ended"}')
+            return
         try:
             snapshot: Mapping[str, JsonValue] = application.status_provider.snapshot()
             if not isinstance(snapshot, Mapping):
@@ -679,6 +690,12 @@ def _write_status_event_stream(stream: object, application: LocalApplication) ->
             application._reject_non_finite(snapshot)
         except Exception:  # noqa: BLE001 - stream errors close without leaking details.
             _write_sse_event(stream, event="error", data='{"code":"status_unavailable"}')
+            return
+
+        # A provider call can overlap session expiry or explicit revocation.
+        # Re-check immediately before emitting any status-derived bytes.
+        if application.security.authenticate(session_id) is None:
+            _write_sse_event(stream, event="close", data='{"reason":"session_ended"}')
             return
 
         if payload != last_payload:
@@ -700,7 +717,7 @@ def _write_status_event_stream(stream: object, application: LocalApplication) ->
 
 
 def _write_sse_event(stream: object, *, event: str, data: str) -> None:
-    stream.write(f"event: {event}\n".encode("utf-8"))
+    stream.write(f"event: {event}\n".encode())
     stream.write(b"data: ")
     stream.write(data.encode("utf-8"))
     stream.write(b"\n\n")
@@ -708,7 +725,7 @@ def _write_sse_event(stream: object, *, event: str, data: str) -> None:
 
 
 def _write_sse_comment(stream: object, comment: str) -> None:
-    stream.write(f": {comment}\n\n".encode("utf-8"))
+    stream.write(f": {comment}\n\n".encode())
     stream.flush()
 
 
@@ -873,11 +890,13 @@ class _LocalRequestHandler(BaseHTTPRequestHandler):
             application = self.local_server.application
             if application is None:
                 return
-            response.writer(self.wfile, application)
+            response.writer(self.wfile, application, response.session_id)
             self.wfile.flush()
         except (TimeoutError, BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
             return
+        finally:
+            response.after_stream()
 
     def log_message(self, format: str, *args: object) -> None:
         # Request targets can contain the one-use launch token if a caller

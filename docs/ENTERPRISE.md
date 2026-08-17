@@ -1,7 +1,8 @@
 # Authorized network assessment evolution
 
-Status: design contract; business, municipal, and regulated-environment features
-described below are not enabled in `0.3.0.dev1`.
+Status: design contract. `0.3.0.dev3` includes only a disabled, offline engagement
+envelope and coverage-planning foundation; business, municipal, regulated,
+organization-wide scanning, evidence, and assurance features remain unavailable.
 
 Lantern's local diagnostic core can grow into an assessment product, but a larger
 scan is not automatically a better assessment. The enterprise product must combine
@@ -62,7 +63,7 @@ flows upward automatically.
 |---|---|---:|---|
 | A | Endpoint and local network-path observation | Passive | Local preview available |
 | B | Small public reachability, DNS, and gateway checks | Off | Local consent available |
-| C | Bounded discovery of an approved private segment | Off | Core policy only; no UI |
+| C | Bounded discovery of an approved private segment | Off | Disabled design-only planner; no collector or UI |
 | D | Approved service identification and configuration review | Off | Not implemented |
 | E | Credentialed device, firewall, switch, AP, or cloud review | Off | Not implemented |
 | F | Vulnerability validation or adversarial testing | Off | Separate product/security phase |
@@ -179,12 +180,13 @@ separate from assessment collection.
 
 ## Delivery sequence
 
-1. Complete the family-ready local explanation experience: Lantern Path, bounded
-   priorities, confidence, coverage, and a safe next step.
-2. Ship reproducible signed macOS, Windows, and Linux local collectors with honest
-   platform parity.
-3. Add an offline engagement-envelope planner and report templates without enabling
-   active organization-wide scanning.
+1. Continue hardening the implemented local explanation preview: Lantern Path,
+   bounded priorities, confidence, coverage, safe next steps, and share-safe local
+   preview are present; signed family distribution and broader user testing remain.
+2. Ship signed/notarized macOS and appropriately trusted Linux collectors with
+   honest platform parity; Windows remains a separate implementation phase.
+3. Preserve the implemented offline engagement-envelope and coverage planner as
+   disabled/design-only until the separate runtime gates below pass.
 4. Review and enable one bounded private-segment discovery profile with packet and
    authorization tests.
 5. Add read-only vendor adapters individually; never add a generic executor.

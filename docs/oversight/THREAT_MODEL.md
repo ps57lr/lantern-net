@@ -1,8 +1,8 @@
 # Lantern threat model
 
-Status: Phase 0 independent review
-Review date: 2026-08-16
-Reviewed baseline: `v0.2.1` / `0871248`
+Status: living threat model; original Phase 0 review plus current local checkpoint
+Review date: 2026-08-17
+Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev3`
 Applies to: Lantern Core, Portable, local UI, LAN responder, and Rescue
 
 ## Executive decision
@@ -25,7 +25,8 @@ Lantern is intended to collect evidence, distinguish device faults from network 
 
 1. Preserve host, network, storage, and boot integrity.
 2. Keep the affected person in control of collection, elevation, active probing, remediation, disruption, and recovery.
-3. Keep credentials, recovery keys, session secrets, and identifying evidence out of reports and logs.
+3. Keep credentials, recovery keys, and session secrets out of reports and logs;
+   classify and minimize identifying evidence before any sharing boundary.
 4. Make remote access authenticated, temporary, locally visible, scoped, and revocable.
 5. Represent uncertainty honestly. Unsupported, denied, skipped, failed, and not tested must never be rendered as healthy.
 6. Preserve a verifiable record of approved actions and results without recording secrets.
@@ -35,7 +36,15 @@ Availability is important, but never outranks data integrity or informed consent
 
 ## Scope
 
-### Current baseline
+### Current local checkpoint
+
+The current source adds an unprivileged, short-lived loopback UI, typed report and
+presentation contracts, consent-bound passive/low-impact profiles, cancellation,
+structural redaction, a reviewed local-file preview, and dry-run/read-only safety
+foundations. It does not add a LAN listener, credentials, real remediation, rescue
+writes, automatic execution, an updater, or a production trust claim.
+
+### Original baseline (historical)
 
 The reviewed CLI runs read-only macOS and Linux collectors for routes, DNS, Wi-Fi, neighbor discovery, mDNS, and selected gateway ports. It emits human and JSON reports and supports identifier redaction. At the review snapshot, 29 tests passed in the project virtual environment. Static analysis was not clean: four existing lint findings remained. The baseline also has correctness and trust-model gaps called out below; passing unit tests do not close those gaps.
 
@@ -190,11 +199,11 @@ Structural redaction must happen before rendering or transport. It must cover st
 
 Reports and logs must never contain passwords, tokens, cookies, pairing codes, private keys, recovery keys, authorization headers, clipboard contents, or credential prompt values. Access requirements are declarative labels only. Credentials should be entered directly into an OS/device-owned prompt at the moment of use. If a future integration cannot avoid a secret, it requires a separate design review, memory-only handling where possible, OS-backed secure storage when persistence is essential, explicit deletion, and log canary tests.
 
-Exports require a preview, clear destination, atomic write, restrictive permissions, bounded retention, and user deletion controls. Crash reports and telemetry remain off until separately designed and consented.
+The current local UI export requires an on-screen preview and a separate explicit download action. It serializes only the already validated, identifier-free UI snapshot in the browser; there is no report-export endpoint or second provider call. Lantern does not upload the file and warns that the selected goal, diagnostic condition, findings, and timing may still be identifying. The browser and operating system choose the destination and may apply backups or sync, so Lantern cannot claim atomic writes, restrictive destination permissions, bounded retention, or deletion after download. Any future automatic support bundle or managed destination must add those controls before enablement. Crash reports and telemetry remain off until separately designed and consented.
 
 ### Local and LAN web security
 
-A loopback UI is still exposed to local browser-origin attacks. It must bind only to loopback, use an unguessable per-launch capability, validate `Origin`/`Host`, prevent CSRF and WebSocket hijacking, set a restrictive Content Security Policy, ship assets locally, escape all evidence, and avoid placing secrets in URLs. The browser must not be able to invoke privileged operations without fresh local approval.
+A loopback UI is still exposed to local browser-origin attacks. The current development UI binds literal `127.0.0.1`, uses a unique per-launch hostname and one-use fragment capability, validates `Origin`/`Host`, requires CSRF for mutations, sets a restrictive Content Security Policy, ships exact hashed assets locally, escapes evidence, and has no privileged endpoint. Status streams are re-authenticated before and after each provider snapshot, limited to one per session and four total, bounded to 25 seconds, and fall back to polling. A session may still be revoked in the very small interval between the final authentication check and a socket write; the emitted data is the same bounded share-safe snapshot already available to that authenticated session, and this residual is accepted only for the unprivileged local development surface. A future privileged or LAN surface needs a stronger transport/identity review.
 
 The LAN responder adds stronger requirements:
 

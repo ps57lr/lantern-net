@@ -16,7 +16,6 @@ EXPECTED_API_ROUTES = {
     "/api/session",
     "/api/status",
     "/api/status/events",
-    "/api/report/export",
     "/api/diagnostics/start",
     "/api/diagnostics/cancel",
     "/api/session/revoke",
@@ -75,12 +74,10 @@ def test_api_routes_and_methods_are_an_exact_same_origin_allowlist(client: str) 
     assert '"/api/status": Object.freeze(["GET"])' in allowlist
     assert '"/api/session": Object.freeze(["GET"])' in allowlist
     assert '"/api/status/events": Object.freeze(["GET"])' in allowlist
-    assert '"/api/report/export": Object.freeze(["GET"])' in allowlist
     for route in EXPECTED_API_ROUTES - {
         "/api/status",
         "/api/session",
         "/api/status/events",
-        "/api/report/export",
     }:
         assert f'"{route}": Object.freeze(["POST"])' in allowlist
     assert "resolved.origin !== window.location.origin" in client
@@ -161,6 +158,7 @@ let sessionGeneration = 50;
 let startInFlight = true;
 let cancelInFlight = true;
 let revokeInFlight = true;
+let exportInFlight = true;
 let pollInFlight = true;
 let authenticated = true;
 let csrfToken = "token";
@@ -180,6 +178,7 @@ const runAnnouncement = {textContent: ""};
 function stopSessionExpiryTimer() {}
 function stopPolling() {}
 function stopStatusStream() {}
+function syncCapabilityNavigation() {}
 function setSessionActionsDisabled(disabled) {
   endSessionButton.disabled = disabled;
   mobileEndSessionButton.disabled = disabled;
@@ -311,6 +310,7 @@ let sessionGeneration = 9;
 let startInFlight = true;
 let cancelInFlight = true;
 let revokeInFlight = true;
+let exportInFlight = true;
 let pollInFlight = true;
 let authenticated = true;
 let csrfToken = "token";
@@ -341,6 +341,7 @@ function setSessionActionsDisabled(disabled) {
   endSessionButton.disabled = disabled;
   mobileEndSessionButton.disabled = disabled;
 }
+function syncCapabilityNavigation() {}
 function showNotice() {}
 function closeSidebar() { throw new Error("desktop clear moved drawer focus"); }
 function renderProgress() {}
@@ -2190,13 +2191,20 @@ def test_dangerous_capabilities_are_rejected_even_if_server_marks_them_true(
 
 def test_polling_runs_only_during_a_run_and_preserves_dynamic_focus(client: str) -> None:
     streaming = client.split("function openStatusStream", 1)[1].split("function schedulePoll", 1)[0]
-    assert 'new EventSource(streamUrl.toString())' in streaming
+    assert "new EventSource(streamUrl.toString())" in streaming
     assert 'event: "status"' in streaming or 'addEventListener("status"' in streaming
+    close_handler = streaming.split('source.addEventListener("close"', 1)[1].split(
+        'source.addEventListener("error"', 1
+    )[0]
+    assert "stillRunning" in close_handler
+    assert "schedulePoll(POLL_RUNNING_MS, false, generation)" in close_handler
     polling = client.split("async function pollStatus", 1)[1].split("function showNotice", 1)[0]
     assert "schedulePoll(POLL_RUNNING_MS, false, generation)" in polling
     assert "applyStatusSnapshot(nextSnapshot, generation)" in polling
 
-    apply_block = client.split("function applyStatusSnapshot", 1)[1].split("function openStatusStream", 1)[0]
+    apply_block = client.split("function applyStatusSnapshot", 1)[1].split(
+        "function openStatusStream", 1
+    )[0]
     assert 'statusSnapshot.state === "running"' in apply_block
     assert "openStatusStream(generation)" in apply_block
     assert "stopStatusStream()" in apply_block
@@ -2208,6 +2216,108 @@ def test_polling_runs_only_during_a_run_and_preserves_dynamic_focus(client: str)
     assert 'pageContent.querySelector("details.technical-disclosure[open]")' in rendering
     assert "replacementDisclosure.open = true" in rendering
     assert "replacement.focus()" in rendering
+
+
+def test_stream_limit_close_falls_back_to_polling_and_reaches_terminal_state(
+    client: str,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+
+    stop_polling = (
+        "function stopPolling"
+        + client.split("function stopPolling", 1)[1].split("function stopStatusStream", 1)[0]
+    )
+    stop_stream = (
+        "function stopStatusStream"
+        + client.split("function stopStatusStream", 1)[1].split(
+            "function syncCapabilityNavigation", 1
+        )[0]
+    )
+    open_stream = (
+        "function openStatusStream"
+        + client.split("function openStatusStream", 1)[1].split("function schedulePoll", 1)[0]
+    )
+    schedule_poll = (
+        "function schedulePoll"
+        + client.split("function schedulePoll", 1)[1].split("async function pollStatus", 1)[0]
+    )
+    harness = r"""
+const POLL_RUNNING_MS = 7;
+let authenticated = true;
+let sessionGeneration = 3;
+let statusStreamGeneration = null;
+let statusEventSource = null;
+let statusSnapshot = {state: "running"};
+let pollTimer = null;
+let pollCalls = 0;
+let streamClosed = 0;
+let scheduled = [];
+const window = {
+  location: {origin: "http://lantern-test.localhost:1234"},
+  setTimeout(callback, delay) {
+    scheduled.push({callback: callback, delay: delay});
+    return scheduled.length;
+  },
+  clearTimeout() {},
+};
+class EventSource {
+  constructor(url) {
+    this.url = url;
+    this.listeners = new Map();
+    globalThis.latestSource = this;
+  }
+  addEventListener(name, callback) { this.listeners.set(name, callback); }
+  close() { streamClosed += 1; }
+  emit(name, data) { this.listeners.get(name)({data: data}); }
+}
+function isCurrentSession(generation) {
+  return authenticated && generation === sessionGeneration;
+}
+function pollStatus() {
+  pollCalls += 1;
+  statusSnapshot = {state: "completed"};
+}
+function applyStatusSnapshot() { throw new Error("unexpected status event"); }
+function validateStatus(value) { return value; }
+function showNotice() { throw new Error("unexpected invalid stream notice"); }
+"""
+    checks = r"""
+openStatusStream(sessionGeneration);
+if (!globalThis.latestSource || statusStreamGeneration !== sessionGeneration) {
+  throw new Error("status stream did not open");
+}
+globalThis.latestSource.emit("close", '{"reason":"stream_limit"}');
+if (statusEventSource !== null || statusStreamGeneration !== null ||
+    streamClosed !== 1 || scheduled.length !== 1 ||
+    scheduled[0].delay !== POLL_RUNNING_MS || pollCalls !== 0) {
+  throw new Error("stream limit did not schedule bounded polling fallback");
+}
+scheduled[0].callback();
+if (pollCalls !== 1 || statusSnapshot.state !== "completed") {
+  throw new Error("polling fallback did not observe the terminal state");
+}
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        [node, "-"],
+        input=(
+            '"use strict";\n'
+            + harness
+            + stop_polling
+            + stop_stream
+            + open_stream
+            + schedule_poll
+            + checks
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
 
 
 def test_terminal_transitions_are_announced_and_cancel_is_visible(
@@ -2247,6 +2357,32 @@ def test_rescue_fixes_lan_session_share_and_credentials_are_honest(
             re.findall(r'<input\b[^>]*name="([^"]+)"', interface, flags=re.IGNORECASE)
         ).lower()
     )
+
+
+def test_report_export_is_previewed_and_serialized_from_validated_local_state(
+    client: str,
+) -> None:
+    assert '"/api/report/export"' not in client
+    export = client.split("function downloadReport", 1)[1].split("function renderShare", 1)[0]
+    assert "validateStatus(JSON.parse(JSON.stringify(statusSnapshot)))" in export
+    assert 'new Blob([payload], { type: "application/json" })' in export
+    assert "blob.size > MAX_JSON_BYTES" in export
+    assert 'link.download = "lantern-report-" + exported.state + ".json"' in export
+    assert "window.fetch" not in export
+
+    share = client.split("function renderShare", 1)[1].split("function renderProgress", 1)[0]
+    for phrase in (
+        "Review redacted JSON",
+        "Included",
+        "Excluded",
+        "may still reveal the selected goal",
+        "browser, operating system, backup, or sync settings",
+        "Download reviewed JSON",
+    ):
+        assert phrase in share
+    assert 'createElement("pre", "report-preview-json"' in share
+    assert "previewBody.tabIndex = 0" in share
+    assert 'previewBody.setAttribute("aria-label", "Share-safe report JSON preview")' in share
 
 
 def test_renderer_uses_text_nodes_and_has_no_unsafe_dom_or_live_fixtures(client: str) -> None:

@@ -268,8 +268,7 @@ def test_ready_viewmodel_is_exact_fixed_v2_contract() -> None:
         "ports",
     ]
     assert all(
-        set(item)
-        == {"id", "label", "status", "detail", "finding", "why_it_matters", "technical"}
+        set(item) == {"id", "label", "status", "detail", "finding", "why_it_matters", "technical"}
         for item in view["modules"]
     )
     assert [item["id"] for item in view["path"]] == [
