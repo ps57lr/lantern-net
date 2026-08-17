@@ -12,6 +12,7 @@ import json
 import math
 import socket
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,6 +47,10 @@ _LOOPBACK_HOST: Final[str] = "127.0.0.1"
 _MAX_REQUEST_BODY: Final[int] = 4096
 _MAX_RESPONSE_BODY: Final[int] = 512 * 1024
 _READ_TIMEOUT_SECONDS: Final[float] = 2.0
+_STATUS_STREAM_TIMEOUT_SECONDS: Final[float] = 30.0
+_STATUS_STREAM_MAX_SECONDS: Final[float] = 25.0
+_STATUS_STREAM_POLL_SECONDS: Final[float] = 0.35
+_STATUS_STREAM_HEARTBEAT_SECONDS: Final[float] = 2.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 3.0
 _MAX_LOCAL_LIFETIME_SECONDS: Final[float] = 20 * 60
 
@@ -63,6 +68,15 @@ class _Response:
     content_type: str
     headers: tuple[tuple[str, str], ...] = ()
     after_write: Callable[[], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamResponse:
+    status: int
+    content_type: str
+    headers: tuple[tuple[str, str], ...]
+    timeout_seconds: float
+    writer: Callable[[object, LocalApplication], None]
 
 
 def _json_bytes(value: object) -> bytes:
@@ -178,6 +192,9 @@ class LocalApplication:
                 "internal_error",
                 "The local application could not complete the request.",
             )
+        if isinstance(response, _StreamResponse):
+            request.write_stream(response, head_only=head_only)
+            return
         request.write_response(response, head_only=head_only)
 
     def _dispatch(self, request: _LocalRequestHandler) -> _Response:
@@ -277,6 +294,39 @@ class LocalApplication:
             if self.security.authenticate(self._session_cookie(request)) is None:
                 return self._unauthorized(clear_cookie=True)
             return self._status_response()
+
+        if path == "/api/status/events":
+            if request.command == "HEAD":
+                return _error_response(
+                    405,
+                    "method_not_allowed",
+                    "That method is not available for the status stream route.",
+                    headers=(("Allow", "GET"),),
+                )
+            if self.security.authenticate(self._session_cookie(request)) is None:
+                return self._unauthorized(clear_cookie=True)
+            return _StreamResponse(
+                status=200,
+                content_type="text/event-stream; charset=utf-8",
+                headers=(
+                    ("Cache-Control", "no-store"),
+                    ("X-Content-Type-Options", "nosniff"),
+                ),
+                timeout_seconds=_STATUS_STREAM_TIMEOUT_SECONDS,
+                writer=_write_status_event_stream,
+            )
+
+        if path == "/api/report/export":
+            if request.command == "HEAD":
+                return _error_response(
+                    405,
+                    "method_not_allowed",
+                    "That method is not available for the report export route.",
+                    headers=(("Allow", "GET"),),
+                )
+            if self.security.authenticate(self._session_cookie(request)) is None:
+                return self._unauthorized(clear_cookie=True)
+            return self._report_export_response()
 
         return _error_response(404, "route_not_found", "That local route does not exist.")
 
@@ -523,6 +573,46 @@ class LocalApplication:
             )
         return _Response(200, body, "application/json; charset=utf-8")
 
+    def _report_export_response(self) -> _Response:
+        try:
+            snapshot: Mapping[str, JsonValue] = self.status_provider.snapshot()
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("status snapshot must be a mapping")
+            state = snapshot.get("state")
+            capabilities = snapshot.get("capabilities")
+            if state not in {"completed", "cancelled", "failed"}:
+                return _error_response(
+                    409,
+                    "export_not_ready",
+                    "A finished diagnostic check is required before export.",
+                )
+            if not isinstance(capabilities, Mapping) or capabilities.get("share_export") is not True:
+                return _error_response(
+                    403,
+                    "export_unavailable",
+                    "Report export is not available for this session state.",
+                )
+            body = _json_bytes(snapshot)
+            if len(body) > self.max_response_body:
+                raise ValueError("export snapshot is too large")
+            self._reject_non_finite(snapshot)
+        except Exception:  # noqa: BLE001 - provider failures are a generic 503.
+            return _error_response(
+                503,
+                "export_unavailable",
+                "A safe report export is not available.",
+            )
+        filename = f"lantern-report-{state}.json"
+        return _Response(
+            200,
+            body,
+            "application/json; charset=utf-8",
+            headers=(
+                ("Content-Disposition", f'attachment; filename="{filename}"'),
+                ("Cache-Control", "no-store"),
+            ),
+        )
+
     @classmethod
     def _reject_non_finite(cls, value: object) -> None:
         if isinstance(value, float) and not math.isfinite(value):
@@ -570,6 +660,56 @@ class LocalApplication:
             "A valid local application session is required.",
             headers=headers,
         )
+
+
+def _write_status_event_stream(stream: object, application: LocalApplication) -> None:
+    """Emit bounded same-origin status snapshots until the run reaches a terminal state."""
+
+    started = time.monotonic()
+    last_payload: bytes | None = None
+    last_heartbeat = started
+    while time.monotonic() - started < _STATUS_STREAM_MAX_SECONDS:
+        try:
+            snapshot: Mapping[str, JsonValue] = application.status_provider.snapshot()
+            if not isinstance(snapshot, Mapping):
+                raise TypeError("status snapshot must be a mapping")
+            payload = _json_bytes(snapshot)
+            if len(payload) > application.max_response_body:
+                raise ValueError("status snapshot is too large")
+            application._reject_non_finite(snapshot)
+        except Exception:  # noqa: BLE001 - stream errors close without leaking details.
+            _write_sse_event(stream, event="error", data='{"code":"status_unavailable"}')
+            return
+
+        if payload != last_payload:
+            _write_sse_event(stream, event="status", data=payload.decode("utf-8"))
+            last_payload = payload
+
+        state = snapshot.get("state")
+        if state != "running":
+            _write_sse_event(stream, event="close", data='{"reason":"terminal"}')
+            return
+
+        now = time.monotonic()
+        if now - last_heartbeat >= _STATUS_STREAM_HEARTBEAT_SECONDS:
+            _write_sse_comment(stream, "heartbeat")
+            last_heartbeat = now
+        time.sleep(_STATUS_STREAM_POLL_SECONDS)
+
+    _write_sse_event(stream, event="close", data='{"reason":"stream_limit"}')
+
+
+def _write_sse_event(stream: object, *, event: str, data: str) -> None:
+    stream.write(f"event: {event}\n".encode("utf-8"))
+    stream.write(b"data: ")
+    stream.write(data.encode("utf-8"))
+    stream.write(b"\n\n")
+    stream.flush()
+
+
+def _write_sse_comment(stream: object, comment: str) -> None:
+    stream.write(f": {comment}\n\n".encode("utf-8"))
+    stream.flush()
 
 
 class _LoopbackHTTPServer(ThreadingHTTPServer):
@@ -713,6 +853,31 @@ class _LocalRequestHandler(BaseHTTPRequestHandler):
                 response.after_write()
             except Exception:  # noqa: BLE001 - post-write hooks never alter the response.
                 return
+
+    def write_stream(self, response: _StreamResponse, *, head_only: bool) -> None:
+        try:
+            self.connection.settimeout(response.timeout_seconds)
+            self.send_response_only(response.status)
+            self.send_header("Content-Type", response.content_type)
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            for name, value in _COMMON_HEADERS.items():
+                if name.lower() == "cache-control":
+                    continue
+                self.send_header(name, value)
+            for name, value in response.headers:
+                self.send_header(name, value)
+            self.end_headers()
+            if head_only:
+                return
+            application = self.local_server.application
+            if application is None:
+                return
+            response.writer(self.wfile, application)
+            self.wfile.flush()
+        except (TimeoutError, BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+            return
 
     def log_message(self, format: str, *args: object) -> None:
         # Request targets can contain the one-use launch token if a caller

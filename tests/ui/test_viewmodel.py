@@ -268,7 +268,8 @@ def test_ready_viewmodel_is_exact_fixed_v2_contract() -> None:
         "ports",
     ]
     assert all(
-        set(item) == {"id", "label", "status", "detail", "finding", "technical"}
+        set(item)
+        == {"id", "label", "status", "detail", "finding", "why_it_matters", "technical"}
         for item in view["modules"]
     )
     assert [item["id"] for item in view["path"]] == [
@@ -288,6 +289,45 @@ def test_ready_viewmodel_is_exact_fixed_v2_contract() -> None:
     assert {item["status"] for item in view["path"]} == {"not_run"}
     assert view["capabilities"]["remediation"] is False
     assert view["capabilities"]["credentials"] is False
+    assert view["capabilities"]["share_export"] is False
+
+
+def test_terminal_states_enable_local_report_export() -> None:
+    ready = ready_ui_viewmodel()
+    assert ready["capabilities"]["share_export"] is False
+
+    completed = build_ui_viewmodel(ideal_low_impact_snapshot(goal="problem"))
+    assert completed["state"] == "completed"
+    assert completed["capabilities"]["share_export"] is True
+
+    cancelled_view = build_ui_viewmodel(
+        snapshot(
+            checks=[check("routing", "cancelled", "cancelled")]
+            + [check(category, "not_run", "not_tested") for category in PLAN[1:]],
+            findings=[],
+            status="cancelled",
+            outcome="cancelled",
+            state="cancelled",
+            goal="problem",
+        )
+    )
+    assert cancelled_view["capabilities"]["share_export"] is True
+
+    failed_view = build_ui_viewmodel(
+        {
+            "state": "failed",
+            "duration_ms": 0,
+            "run": {
+                "goal": "problem",
+                "profile": "passive",
+                "include_mdns": False,
+                "cancel_requested": False,
+            },
+            "progress": {"processed": 0, "planned": 0, "percent": 0, "events": []},
+            "result": None,
+        }
+    )
+    assert failed_view["capabilities"]["share_export"] is True
 
 
 def test_output_contract_is_bounded_and_control_free() -> None:

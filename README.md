@@ -2,7 +2,7 @@
 
 Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working development build includes the `netdiag` command-line utility and a local browser interface for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
 
-> **Development status:** the current package is `0.3.0.dev1`. It is not production software, a remote-support service, an organization-wide network assessment, or an automatic repair tool. Use it only on computers and networks you own, manage, or are explicitly authorized to assess.
+> **Development status:** the current package is `0.3.0.dev3`. It is not production software, a remote-support service, an organization-wide network assessment, or an automatic repair tool. Use it only on computers and networks you own, manage, or are explicitly authorized to assess.
 
 ## What works today
 

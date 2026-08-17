@@ -553,7 +553,7 @@ for (const scenario of DESKTOP_SCENARIOS) {
         credentials: false,
         lan_remote: false,
         rescue_boot: false,
-        share_export: false,
+        share_export: true,
       });
       if (scenario.id === "cancel") {
         expect(status.run.cancel_requested).toBe(true);

@@ -15,6 +15,8 @@ EXPECTED_API_ROUTES = {
     "/api/session/exchange",
     "/api/session",
     "/api/status",
+    "/api/status/events",
+    "/api/report/export",
     "/api/diagnostics/start",
     "/api/diagnostics/cancel",
     "/api/session/revoke",
@@ -72,7 +74,14 @@ def test_api_routes_and_methods_are_an_exact_same_origin_allowlist(client: str) 
         assert f'"{route}"' in allowlist
     assert '"/api/status": Object.freeze(["GET"])' in allowlist
     assert '"/api/session": Object.freeze(["GET"])' in allowlist
-    for route in EXPECTED_API_ROUTES - {"/api/status", "/api/session"}:
+    assert '"/api/status/events": Object.freeze(["GET"])' in allowlist
+    assert '"/api/report/export": Object.freeze(["GET"])' in allowlist
+    for route in EXPECTED_API_ROUTES - {
+        "/api/status",
+        "/api/session",
+        "/api/status/events",
+        "/api/report/export",
+    }:
         assert f'"{route}": Object.freeze(["POST"])' in allowlist
     assert "resolved.origin !== window.location.origin" in client
     assert "resolved.pathname !== route" in client
@@ -107,6 +116,7 @@ def test_session_authority_stays_in_memory_and_401_stops_polling(client: str) ->
     assert "authenticated = false" in clear_block
     assert "csrfToken = null" in clear_block
     assert "stopPolling()" in clear_block
+    assert "stopStatusStream()" in clear_block
     assert "stopSessionExpiryTimer()" in clear_block
     assert "document.cookie" not in client
 
@@ -116,13 +126,14 @@ def test_session_authority_stays_in_memory_and_401_stops_polling(client: str) ->
         "indexedDB",
         "serviceWorker",
         "WebSocket",
-        "EventSource",
         "sendBeacon",
         "navigator.clipboard",
         "pagehide",
         "beforeunload",
     ):
         assert forbidden not in client
+    assert "new EventSource(" in client
+    assert 'streamUrl.pathname !== "/api/status/events"' in client
 
 
 def test_clearing_a_session_removes_stale_run_announcements(client: str) -> None:
@@ -168,6 +179,7 @@ const connectionState = {textContent: "Private local session"};
 const runAnnouncement = {textContent: ""};
 function stopSessionExpiryTimer() {}
 function stopPolling() {}
+function stopStatusStream() {}
 function setSessionActionsDisabled(disabled) {
   endSessionButton.disabled = disabled;
   mobileEndSessionButton.disabled = disabled;
@@ -324,6 +336,7 @@ const connectionState = {textContent: "Private local session"};
 const runAnnouncement = {textContent: "old run copy"};
 function stopSessionExpiryTimer() {}
 function stopPolling() {}
+function stopStatusStream() {}
 function setSessionActionsDisabled(disabled) {
   endSessionButton.disabled = disabled;
   mobileEndSessionButton.disabled = disabled;
@@ -1579,10 +1592,11 @@ const base = {
   modules: GOAL_MODULE_ORDER.network.map((id) => ({id: id, label: PAGE_META[id].title,
                                     status: "ok", detail: "Complete.",
                                     finding: "No issue was reported by this module.",
+                                    why_it_matters: "This module helps explain one bounded layer of the network path.",
                                     technical: ["The bounded module reached a terminal state."]})),
   capabilities: {passive_scan: true, low_impact_network: true,
                  active_discovery: false, remediation: false, credentials: false,
-                 lan_remote: false, rescue_boot: false, share_export: false},
+                 lan_remote: false, rescue_boot: false, share_export: true},
 };
 function copy() { return JSON.parse(JSON.stringify(base)); }
 function mustReject(change) {
@@ -1713,10 +1727,11 @@ function fixture() {
       detail: "The bounded module completed.",
       finding: id === "lan" ? "Passive LAN observations completed; active discovery did not run."
                             : "No issue was reported by this module.",
+      why_it_matters: "This module helps explain one bounded layer of the network path.",
       technical: ["The module reached a terminal state within the authorized profile."]})),
     capabilities: {passive_scan: true, low_impact_network: true, active_discovery: false,
       remediation: false, credentials: false, lan_remote: false, rescue_boot: false,
-      share_export: false},
+      share_export: true},
   };
 }
 function issue(code, module, severity) {
@@ -1793,6 +1808,7 @@ cancelled.run.cancel_requested = true;
 cancelled.progress = {processed: 8, planned: 8, percent: 100};
 cancelled.path.forEach((item) => { item.status = "not_run"; item.detail = "Not checked before cancellation."; });
 cancelled.modules.forEach((item) => { item.status = "cancelled"; item.finding = "This module was cancelled."; });
+cancelled.capabilities.share_export = true;
 fixtures.push(["cancelled", cancelled]);
 
 const failed = fixture();
@@ -1806,6 +1822,7 @@ failed.assessment.coverage = "none";
 failed.progress = {processed: 0, planned: 0, percent: 0};
 failed.path.forEach((item) => { item.status = "unavailable"; item.detail = "No safe layer status is available."; });
 failed.modules.forEach((item) => { item.status = "unavailable"; item.finding = "No safe finding is available."; });
+failed.capabilities.share_export = true;
 fixtures.push(["failed", failed]);
 
 for (const [name, value] of fixtures) {
@@ -1828,8 +1845,18 @@ process.stdout.write(fixtures.map((item) => item[0]).join(","));
 
 
 def test_python_v2_lifecycle_snapshots_match_the_javascript_validator(client: str) -> None:
+    import importlib.util
+
     from netdiag.ui.viewmodel import build_ui_viewmodel, ready_ui_viewmodel
-    from tests.ui.test_viewmodel import ideal_low_impact_snapshot
+
+    viewmodel_tests = importlib.util.spec_from_file_location(
+        "lantern_test_viewmodel",
+        Path(__file__).with_name("test_viewmodel.py"),
+    )
+    assert viewmodel_tests and viewmodel_tests.loader
+    module = importlib.util.module_from_spec(viewmodel_tests)
+    viewmodel_tests.loader.exec_module(module)
+    ideal_low_impact_snapshot = module.ideal_low_impact_snapshot
 
     node = shutil.which("node")
     if node is None:
@@ -1965,7 +1992,11 @@ const statusSnapshot = {
   modules: MODULE_IDS.map((id) => ({id: id, label: PAGE_META[id].title,
     status: id === "route" ? "attention" : "ok", detail: "Bounded module state.",
     finding: "Safe finding for " + PAGE_META[id].title + ".",
+    why_it_matters: "This module helps explain one bounded layer of the network path.",
     technical: ["Identifier-free technical note one.", "Identifier-free technical note two."]})),
+  capabilities: {passive_scan: true, low_impact_network: true, active_discovery: false,
+    remediation: false, credentials: false, lan_remote: false, rescue_boot: false,
+    share_export: true},
 };
 const assessment = assessmentPanel();
 if (descendants(assessment, "dl").length !== 1 || descendants(assessment, "dt").length !== 2 ||
@@ -2148,21 +2179,27 @@ def test_dangerous_capabilities_are_rejected_even_if_server_marks_them_true(
         "credentials",
         "lan_remote",
         "rescue_boot",
-        "share_export",
     ):
         assert f'"{capability}"' in capability_block
+    assert '"share_export"' in capability_block
+    assert "EXPORT_STATES" in capability_block
     assert "result[name] !== false" in capability_block
     assert "result.passive_scan !== true" in capability_block
     assert "result.low_impact_network !== true" in capability_block
 
 
 def test_polling_runs_only_during_a_run_and_preserves_dynamic_focus(client: str) -> None:
+    streaming = client.split("function openStatusStream", 1)[1].split("function schedulePoll", 1)[0]
+    assert 'new EventSource(streamUrl.toString())' in streaming
+    assert 'event: "status"' in streaming or 'addEventListener("status"' in streaming
     polling = client.split("async function pollStatus", 1)[1].split("function showNotice", 1)[0]
-    assert 'statusSnapshot.state === "running"' in polling
     assert "schedulePoll(POLL_RUNNING_MS, false, generation)" in polling
-    assert "stopPolling()" in polling
-    assert "JSON.stringify(nextSnapshot) !== JSON.stringify(statusSnapshot)" in polling
-    assert "if (changed)" in polling
+    assert "applyStatusSnapshot(nextSnapshot, generation)" in polling
+
+    apply_block = client.split("function applyStatusSnapshot", 1)[1].split("function openStatusStream", 1)[0]
+    assert 'statusSnapshot.state === "running"' in apply_block
+    assert "openStatusStream(generation)" in apply_block
+    assert "stopStatusStream()" in apply_block
 
     rendering = client.split("function renderCurrentView", 1)[1].split("function setView", 1)[0]
     assert "document.activeElement" in rendering
@@ -2203,7 +2240,7 @@ def test_rescue_fixes_lan_session_share_and_credentials_are_honest(
         "Do not enter passwords, recovery keys, or other secrets",
     ):
         assert phrase in combined
-    assert re.search(r'data-view-target="share" disabled', interface)
+    assert "syncCapabilityNavigation" in client
     assert (
         "password"
         not in " ".join(

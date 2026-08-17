@@ -1368,6 +1368,24 @@ h3 {
   line-height: 1.62;
 }
 
+.module-why {
+  margin: 0.35rem 0 0.85rem;
+}
+
+.module-copy-button {
+  margin-top: 0.85rem;
+}
+
+.recommendation-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.recommendation-card h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
 .module-finding {
   max-width: 850px;
   margin-top: 26px;

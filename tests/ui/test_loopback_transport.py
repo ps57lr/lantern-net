@@ -18,7 +18,7 @@ from netdiag.ui import server as server_module
 from netdiag.ui.controller import JsonValue
 from netdiag.ui.security import LocalSessionSecurity
 from netdiag.ui.server import LanternLocalServer
-from netdiag.ui.viewmodel import ready_ui_viewmodel
+from netdiag.ui.viewmodel import build_ui_viewmodel, ready_ui_viewmodel
 
 
 @dataclass(slots=True)
@@ -938,3 +938,140 @@ def test_lifetime_guard_normalizes_cleanup_failure_without_stranding_server(
     assert server.lifecycle_failed
     assert not server.is_running
     server.close()
+
+
+class CompletedStatusProvider:
+    def snapshot(self) -> dict[str, JsonValue]:
+        checks = [
+            {"module": "routing", "execution_status": "completed", "outcome_status": "informational"},
+            {"module": "routing", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "dns", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "wifi", "execution_status": "completed", "outcome_status": "informational"},
+            {"module": "lan", "execution_status": "completed", "outcome_status": "informational"},
+            {"module": "mdns", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "gateway_ports", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "lan", "execution_status": "not_run", "outcome_status": "not_tested"},
+        ]
+        findings = [
+            {
+                "code": "NDG.ROUTE.DEFAULT_ROUTE_OBSERVED",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "high"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+            {
+                "code": "NDG.WIFI.CONNECTED",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "medium"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+            {
+                "code": "NDG.LAN.NEIGHBOR_CACHE_READ",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "medium"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+        ]
+        return build_ui_viewmodel(
+            {
+                "state": "completed",
+                "duration_ms": 12,
+                "run": {
+                    "goal": "problem",
+                    "profile": "passive",
+                    "include_mdns": False,
+                    "cancel_requested": False,
+                },
+                "progress": {
+                    "processed": 8,
+                    "planned": 8,
+                    "percent": 100,
+                    "events": [],
+                },
+                "result": {
+                    "schema_version": "1.1",
+                    "status": "partial",
+                    "outcome": "inconclusive",
+                    "severity": "ok",
+                    "coverage": {
+                        "status": "partial",
+                        "planned": 8,
+                        "completed": 3,
+                        "partial": 0,
+                        "failed": 0,
+                        "cancelled": 0,
+                        "not_run": 5,
+                    },
+                    "checks": checks,
+                    "findings": findings,
+                    "redacted": True,
+                    "truncated": False,
+                },
+            }
+        )
+
+
+def test_report_export_requires_finished_state(local_server: LanternLocalServer) -> None:
+    _result, cookie, _csrf = exchange(local_server)
+    not_ready = request(
+        local_server,
+        "GET",
+        "/api/report/export",
+        headers={"Cookie": cookie, "Origin": local_server.origin},
+    )
+    assert not_ready.status == 409
+    assert error_code(not_ready) == "export_not_ready"
+
+
+def test_report_export_returns_redacted_viewmodel() -> None:
+    with LanternLocalServer(status_provider=CompletedStatusProvider()) as server:
+        _result, cookie, _csrf = exchange(server)
+        exported = request(
+            server,
+            "GET",
+            "/api/report/export",
+            headers={"Cookie": cookie, "Origin": server.origin},
+        )
+        assert exported.status == 200
+        assert exported.headers["content-type"].startswith("application/json")
+        assert 'attachment; filename="lantern-report-completed.json"' in exported.headers[
+            "content-disposition"
+        ]
+        payload = exported.json()
+        assert payload["schema"] == "lantern.ui.v2"
+        assert payload["capabilities"]["share_export"] is True
+        assert payload["state"] == "completed"
+
+
+def test_status_event_stream_emits_terminal_close_event() -> None:
+    with LanternLocalServer(status_provider=CompletedStatusProvider()) as server:
+        _result, cookie, _csrf = exchange(server)
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            connection.putrequest(
+                "GET",
+                "/api/status/events",
+                skip_host=True,
+            )
+            connection.putheader("Host", urlsplit(server.origin).netloc)
+            connection.putheader("Cookie", cookie)
+            connection.putheader("Origin", server.origin)
+            connection.endheaders()
+            response = connection.getresponse()
+            assert response.status == 200
+            assert response.getheader("Content-Type", "").startswith("text/event-stream")
+            body = response.read().decode("utf-8")
+        finally:
+            connection.close()
+        assert "event: status" in body
+        assert "event: close" in body
+        assert '"state":"completed"' in body.replace(" ", "")
