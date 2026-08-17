@@ -123,7 +123,7 @@ STATIC_SECURITY_HEADERS: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "Cross-Origin-Resource-Policy": "same-origin",
         "Permissions-Policy": (
-            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=(), bluetooth=()"
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=()"
         ),
         "Referrer-Policy": "no-referrer",
         "X-Content-Type-Options": "nosniff",
