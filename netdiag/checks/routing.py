@@ -93,7 +93,7 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
 
 def is_virtual_bridge_interface(name: str) -> bool:
     lower = name.lower()
-    return lower == "docker0" or lower.startswith("br-") or lower.startswith("virbr")
+    return lower == "docker0" or lower.startswith(("br-", "virbr"))
 
 
 def _private_ipv4_network(network: str) -> ipaddress.IPv4Network | None:

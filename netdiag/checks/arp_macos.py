@@ -7,7 +7,6 @@ import ctypes
 import ctypes.util
 import json
 import socket
-import sys
 from dataclasses import dataclass
 
 CTL_NET = 4

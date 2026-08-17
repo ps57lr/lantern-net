@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from netdiag.checks.routing import RouteInfo, check_routing, get_routes, local_ipv4_networks, primary_lan_network
+from netdiag.checks.routing import RouteInfo, check_routing, get_routes, local_ipv4_networks
 from netdiag.findings import Severity
 from netdiag.platform import OSInfo
 
