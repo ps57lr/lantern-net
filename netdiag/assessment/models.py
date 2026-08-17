@@ -777,7 +777,13 @@ class EngagementEnvelope:
                 parse_constant=reject_constant,
                 object_pairs_hook=exact_object,
             )
-        except (json.JSONDecodeError, RecursionError, UnicodeError) as exc:
+        except RecursionError as exc:
+            # CPython 3.10 and 3.11 can reject deeply nested input in the
+            # decoder before the bounded structural walk below sees it.
+            # Normalize that version-dependent path to the same fail-closed
+            # nesting result instead of misreporting it as malformed JSON.
+            raise ValueError("assessment envelope JSON nesting exceeds 32 levels") from exc
+        except (json.JSONDecodeError, UnicodeError) as exc:
             raise ValueError("assessment envelope is not valid JSON") from exc
         stack: list[tuple[object, int]] = [(parsed, 0)]
         visited = 0

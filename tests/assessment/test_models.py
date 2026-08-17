@@ -17,6 +17,7 @@ from netdiag.assessment import (
     TechniqueBudget,
     TechniqueState,
 )
+from netdiag.assessment import models as assessment_models
 
 from .conftest import utc
 
@@ -228,6 +229,18 @@ def test_local_json_rejects_unknown_duplicate_nonfinite_noncanonical_and_deep_va
         EngagementEnvelope.from_canonical_json(canonical + "\ud800")
     with pytest.raises(ValueError, match="nesting"):
         EngagementEnvelope.from_canonical_json("[" * 2000 + "]" * 2000)
+
+
+def test_decoder_recursion_is_normalized_as_excessive_nesting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def recursive_decoder(*_args, **_kwargs):
+        raise RecursionError("interpreter-specific decoder limit")
+
+    monkeypatch.setattr(assessment_models.json, "loads", recursive_decoder)
+
+    with pytest.raises(ValueError, match="nesting exceeds 32 levels"):
+        EngagementEnvelope.from_canonical_json("{}")
 
 
 def test_local_dict_rejects_nested_unknown_secret_fields(valid_envelope) -> None:
