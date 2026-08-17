@@ -1,0 +1,25 @@
+{
+  "architecture": "arm64",
+  "archive": "cpython-3.11.15+20260728-aarch64-apple-darwin-install_only.tar.gz",
+  "archive_sha256": "7dc10e31eede05a6ab1ec9e0b961f521078b0959f838ed1d7452597d529ff802",
+  "build_site_packages_sha256": "d027604b53d335f21c22687cfa4e69d83c7a1468664ebbbe502f5377388bb5fd",
+  "libpython": "python/lib/libpython3.11.dylib",
+  "libpython_sha256": "39669f88807bff419376e0ba17ae68d194f065f7959fb61cd4777af65da09e51",
+  "minimum_macos": "11.0",
+  "provider": "Astral python-build-standalone",
+  "python_executable": "python/bin/python3.11",
+  "python_executable_sha256": "95c331c5e61804b2dcea00dd105fbf7c9e417aaabff23fa5da6758d84033029d",
+  "release": "20260728",
+  "runtime_tree_sha256": "89f2b0d5e85dc62c5ec225dc850e097f863c7406d23a2835a4e983f050ee093d",
+  "schema": "lantern.macos-runtime.v1",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260728/cpython-3.11.15%2B20260728-aarch64-apple-darwin-install_only.tar.gz",
+  "version": "3.11.15",
+  "wheels": {
+    "altgraph-0.17.5-py2.py3-none-any.whl": "f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597",
+    "macholib-1.16.4-py2.py3-none-any.whl": "da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea",
+    "packaging-26.3-py3-none-any.whl": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c",
+    "pyinstaller-6.22.1-py3-none-macosx_10_13_universal2.whl": "d519a5549bf560407a9cffa8547f278e79c1093dc1cade6d9658c67b650d66c4",
+    "pyinstaller_hooks_contrib-2026.6-py3-none-any.whl": "fd13b8ac126b35361175edacd41a0d97080b75dd5f4b594ecefefff969509dd3",
+    "setuptools-84.0.0-py3-none-any.whl": "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+  }
+}

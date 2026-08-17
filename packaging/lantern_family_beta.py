@@ -11,10 +11,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import plistlib
 import socket
 import subprocess
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 SELF_TEST_SCHEMA = "lantern.package-self-test.v1"
 VERIFY_EXECUTABLE_NAME = "verify-lantern-package"
@@ -37,6 +39,26 @@ def _install_offline_audit_guard() -> None:
             raise OfflineSelfTestViolation("network access is disabled during package self-test")
 
     sys.addaudithook(audit)
+
+
+def _release_metadata() -> tuple[str, bool]:
+    """Return the packaged release channel and unsigned flag from bundle metadata."""
+
+    if sys.platform == "darwin" and getattr(sys, "frozen", False):
+        info_path = Path(sys.executable).resolve().parent.parent / "Info.plist"
+        if info_path.is_file() and not info_path.is_symlink():
+            try:
+                with info_path.open("rb") as stream:
+                    info = plistlib.load(stream)
+            except (OSError, plistlib.InvalidFileException):
+                info = {}
+            channel = info.get("LanternReleaseChannel")
+            unsigned = info.get("LanternUnsignedDevelopment")
+            if channel in {"family-beta-development", "family-beta-signed"} and isinstance(
+                unsigned, bool
+            ):
+                return channel, unsigned
+    return "family-beta-development", True
 
 
 def _prove_offline_guard() -> bool:
@@ -65,11 +87,12 @@ def _self_test_payload() -> dict[str, object]:
     if schema.get("properties", {}).get("schema_version", {}).get("const") != SCHEMA_VERSION:
         raise RuntimeError("the packaged report schema does not match the runtime contract")
 
+    release_channel, unsigned_development = _release_metadata()
     return {
         "schema": SELF_TEST_SCHEMA,
         "product": "Lantern",
-        "release_channel": "family-beta-development",
-        "unsigned_development": True,
+        "release_channel": release_channel,
+        "unsigned_development": unsigned_development,
         "frozen": bool(getattr(sys, "frozen", False)),
         "version": __version__,
         "contracts": {

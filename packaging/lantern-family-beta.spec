@@ -14,6 +14,11 @@ if re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", bundle_short_version) is None:
     raise SystemExit("LANTERN_BUNDLE_SHORT_VERSION is missing or invalid")
 if re.fullmatch(r"[1-9][0-9]*", bundle_build_version) is None:
     raise SystemExit("LANTERN_BUNDLE_BUILD_VERSION is missing or invalid")
+target_arch = None
+if sys.platform == "darwin":
+    target_arch = os.environ.get("LANTERN_TARGET_ARCH", "")
+    if target_arch != "arm64":
+        raise SystemExit("LANTERN_TARGET_ARCH is missing or invalid")
 
 block_cipher = None
 project_root = os.path.dirname(os.path.abspath(SPECPATH))
@@ -60,7 +65,7 @@ launcher = EXE(
     console=False,
     disable_windowed_traceback=True,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=target_arch,
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -78,7 +83,7 @@ verifier = EXE(
     console=True,
     disable_windowed_traceback=True,
     argv_emulation=False,
-    target_arch=None,
+    target_arch=target_arch,
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -108,5 +113,7 @@ if sys.platform == "darwin":
             "CFBundleVersion": bundle_build_version,
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
+            "LanternReleaseChannel": "family-beta-development",
+            "LanternUnsignedDevelopment": True,
         },
     )

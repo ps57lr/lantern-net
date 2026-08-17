@@ -1,8 +1,10 @@
 # Authorized network assessment evolution
 
-Status: design contract. `0.3.0.dev3` includes only a disabled, offline engagement
-envelope and coverage-planning foundation; business, municipal, regulated,
-organization-wide scanning, evidence, and assurance features remain unavailable.
+Status: design contract. `0.3.0.dev4` adds signing-aware packaging work but includes
+only a disabled, offline engagement envelope and coverage-planning foundation;
+business, municipal, regulated, organization-wide scanning, evidence, and assurance
+features remain unavailable. Packaging trust work does not enable an enterprise
+assessment capability or compliance claim.
 
 Lantern's local diagnostic core can grow into an assessment product, but a larger
 scan is not automatically a better assessment. The enterprise product must combine

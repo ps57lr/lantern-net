@@ -1,6 +1,6 @@
 # Generated and reviewed for the PyInstaller 6.22.1 family-beta build toolchain.
 # Install with: pip install --only-binary=:all: --require-hashes -r <this file>
-# Supported build hosts: macOS arm64/x86_64 and glibc Linux arm64/x86_64.
+# Supported build hosts: macOS arm64 and glibc Linux arm64/x86_64.
 
 PyInstaller==6.22.1 \
     --hash=sha256:d519a5549bf560407a9cffa8547f278e79c1093dc1cade6d9658c67b650d66c4 \

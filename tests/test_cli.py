@@ -3,6 +3,8 @@ import signal
 import threading
 from argparse import Namespace
 
+import pytest
+
 from netdiag import cli
 from netdiag.checks.dns import DNSAnswer
 from netdiag.findings import Finding, Severity
@@ -52,6 +54,14 @@ class _FakeUIServer:
 
     def close(self) -> None:
         self.events.append("server.close")
+
+
+def test_cli_reports_dev4_version(capsys):
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--version"])
+
+    assert exited.value.code == 0
+    assert capsys.readouterr().out == "netdiag 0.3.0.dev4\n"
 
 
 def test_lan_json_serializes_severity(monkeypatch, capsys):
