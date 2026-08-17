@@ -4,43 +4,51 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
+import time
+import webbrowser
+from collections.abc import Callable
 
 from netdiag import __version__
-from netdiag.checks.dns import analyze_answers, compare_resolvers, system_resolvers
+from netdiag.checks.dns import (
+    MAX_RESOLVERS,
+    SYSTEM_RESOLVER,
+    analyze_answers,
+    compare_resolvers,
+    normalize_query_name,
+    normalize_resolver,
+    system_resolvers,
+)
 from netdiag.checks.lan import scan_lan
 from netdiag.checks.mdns import browse_mdns
 from netdiag.checks.ports import scan_ports
 from netdiag.checks.routing import check_routing
 from netdiag.checks.wifi import check_wifi
-from netdiag.findings import Finding, exit_code, worst_severity
-from netdiag.platform import detect_os, maybe_reexec_macos_system_python, which
+from netdiag.findings import Finding, exit_code
+from netdiag.platform import detect_os, which
+from netdiag.presentation import serialize_command_result
 from netdiag.report import print_report
 from netdiag.scanner import report_exit_code, run_full_scan
+from netdiag.terminal import terminal_safe
+
+_UI_SESSION_LIFETIME_SECONDS = 15 * 60.0
+_UI_WAIT_SLICE_SECONDS = 0.25
+_UI_BROWSER_OPEN_TIMEOUT_SECONDS = 10.0
 
 
-def _json_result(findings: list[Finding], data: dict) -> None:
-    print(
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "tool_version": __version__,
-                "severity": worst_severity(findings).value,
-                "findings": [f.to_dict() for f in findings],
-                "data": data,
-            },
-            indent=2,
-        )
-    )
+def _json_result(findings: list[Finding], data: dict, *, category: str) -> None:
+    print(json.dumps(serialize_command_result(findings, data, category=category), indent=2))
 
 
 def _print_findings(findings: list[Finding]) -> None:
     for finding in findings:
-        print(f"[{finding.severity.value.upper()}] {finding.title}")
+        print(f"[{finding.severity.value.upper()}] {terminal_safe(finding.title)}")
         if finding.detail:
-            print(f"  {finding.detail}")
+            print(f"  {terminal_safe(finding.detail)}")
         if finding.hint:
-            print(f"  → {finding.hint}")
+            print(f"  → {terminal_safe(finding.hint)}")
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -75,28 +83,49 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_dns(args: argparse.Namespace) -> int:
     osinfo = detect_os()
-    domain = args.domain
-    if args.resolvers:
-        resolvers = [r.strip() for r in args.resolvers.split(",") if r.strip()]
-        if not resolvers:
-            print("netdiag: --resolvers must contain at least one resolver", file=sys.stderr)
+    domain = normalize_query_name(args.domain)
+    if domain is None:
+        print("netdiag: domain must be a valid DNS name or IP address", file=sys.stderr)
+        return 2
+    if args.resolvers is not None:
+        requested = [item.strip() for item in args.resolvers.split(",") if item.strip()]
+        resolvers = [normalized for item in requested if (normalized := normalize_resolver(item))]
+        if (
+            not requested
+            or len(resolvers) != len(requested)
+            or len(set(resolvers)) != len(resolvers)
+            or len(resolvers) > MAX_RESOLVERS
+        ):
+            print(
+                f"netdiag: --resolvers requires 1-{MAX_RESOLVERS} unique IPv4/IPv6 address literals",
+                file=sys.stderr,
+            )
             return 2
     else:
         configured = system_resolvers(osinfo)
-        resolvers = configured if configured and which("dig") else ["system"]
+        resolvers = configured if configured and which("dig") else [SYSTEM_RESOLVER]
 
     answers = compare_resolvers(domain, resolvers)
     findings = analyze_answers(domain, answers)
     if args.json:
-        _json_result(findings, {"domain": domain, "answers": [a.to_dict() for a in answers]})
+        _json_result(
+            findings,
+            {"domain": domain, "answers": [a.to_dict() for a in answers]},
+            category="dns",
+        )
         return exit_code(findings)
 
-    print(f"DNS compare: {domain}\n")
+    print(f"DNS compare: {terminal_safe(domain)}\n")
     for a in answers:
-        status = ", ".join(a.addresses) if a.addresses else f"ERROR: {a.error}"
+        status = (
+            ", ".join(terminal_safe(address) for address in a.addresses)
+            if a.addresses
+            else "ERROR: no usable IPv4 answer was returned"
+        )
         flag = " [BLOCKED?]" if a.blocked else ""
         latency = f" ({a.response_ms} ms)" if a.response_ms is not None else ""
-        print(f"  @{a.resolver:17} → {status}{flag}{latency}")
+        resolver = terminal_safe(a.resolver)
+        print(f"  @{resolver:17} → {status}{flag}{latency}")
 
     if findings:
         print()
@@ -108,7 +137,7 @@ def cmd_wifi(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = check_wifi(osinfo)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="wifi")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -118,7 +147,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = check_routing(osinfo)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="routing")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -128,7 +157,7 @@ def cmd_lan(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = scan_lan(osinfo, do_ping=args.ping, max_hosts=args.max_hosts)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="lan")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -147,7 +176,7 @@ def cmd_ports(args: argparse.Namespace) -> int:
             return 2
     findings, data = scan_ports(args.host, ports=ports)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="ports")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -157,10 +186,161 @@ def cmd_mdns(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = browse_mdns(osinfo, timeout=args.timeout)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="mdns")
     else:
         _print_findings(findings)
     return exit_code(findings)
+
+
+def _create_ui_runtime():
+    """Create one shared service/server pair without importing UI code at CLI startup."""
+
+    from netdiag.ui import LanternLocalServer, LocalDiagnosticService
+
+    service = LocalDiagnosticService()
+    return service, LanternLocalServer(diagnostic_service=service)
+
+
+def _install_ui_signal_handlers(
+    stop_requested: threading.Event,
+) -> dict[signal.Signals, object]:
+    previous: dict[signal.Signals, object] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop_requested.set()
+
+    for name in ("SIGINT", "SIGTERM"):
+        member = getattr(signal, name, None)
+        if member is None:
+            continue
+        try:
+            previous[member] = signal.getsignal(member)
+            signal.signal(member, request_stop)
+        except (OSError, ValueError):
+            previous.pop(member, None)
+    return previous
+
+
+def _restore_ui_signal_handlers(previous: dict[signal.Signals, object]) -> None:
+    for member, handler in previous.items():
+        try:
+            signal.signal(member, handler)
+        except (OSError, ValueError):
+            continue
+
+
+def _wait_for_ui_exit(
+    server: object,
+    stop_requested: threading.Event,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Wait for revoke or a signal, bounded by the absolute local-session lifetime."""
+
+    wait = getattr(server, "wait", None)
+    if not callable(wait):
+        raise TypeError("local UI server does not provide a wait lifecycle")
+    while not stop_requested.is_set():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        if wait(min(_UI_WAIT_SLICE_SECONDS, remaining)):
+            return True
+    return True
+
+
+def _open_ui_browser(url: str, *, timeout: float) -> bool:
+    """Bound a potentially blocking platform browser launcher in a daemon thread."""
+
+    if type(url) is not str or not url or timeout <= 0:
+        return False
+    completed = threading.Event()
+    opened = False
+
+    def launch() -> None:
+        nonlocal opened
+        try:
+            opened = webbrowser.open(url, new=1, autoraise=True) is True
+        except Exception:  # noqa: BLE001 - launcher errors may contain paths or arguments.
+            opened = False
+        finally:
+            completed.set()
+
+    thread = threading.Thread(
+        target=launch,
+        name="lantern-browser-launch",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:  # noqa: BLE001 - normalize platform thread-launch failure.
+        return False
+    if not completed.wait(timeout):
+        return False
+    thread.join(timeout=0)
+    return opened
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Open the local-only development UI without starting a diagnostic."""
+
+    del args
+    service = None
+    server = None
+    result = 0
+    stop_requested = threading.Event()
+    previous_handlers = _install_ui_signal_handlers(stop_requested)
+    deadline = time.monotonic() + _UI_SESSION_LIFETIME_SECONDS
+    try:
+        service, server = _create_ui_runtime()
+        server.start()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("Lantern's local session expired and was closed.")
+        elif not _open_ui_browser(
+            server.launch_url,
+            timeout=min(_UI_BROWSER_OPEN_TIMEOUT_SECONDS, remaining),
+        ):
+            print(
+                "netdiag: Lantern could not open the local browser interface.",
+                file=sys.stderr,
+            )
+            result = 1
+        else:
+            print("Lantern local developer preview is open in your browser.")
+            print("No scan or repair starts automatically, and nothing is uploaded.")
+            print("Choose End local session or press Ctrl-C to close Lantern.")
+            try:
+                ended = _wait_for_ui_exit(
+                    server,
+                    stop_requested,
+                    deadline=deadline,
+                    monotonic=time.monotonic,
+                )
+            except KeyboardInterrupt:
+                ended = True
+            if not ended:
+                print("Lantern's local session expired and was closed.")
+    except KeyboardInterrupt:
+        result = 0
+    except Exception:  # noqa: BLE001 - never echo local paths, launch tokens, or adapter errors.
+        print("netdiag: Lantern's local interface could not be started.", file=sys.stderr)
+        result = 1
+    finally:
+        _restore_ui_signal_handlers(previous_handlers)
+        if server is not None:
+            try:
+                server.close()
+            except Exception:  # noqa: BLE001 - cleanup errors are normalized.
+                result = 1
+        if service is not None:
+            try:
+                if not service.close(timeout=3.0):
+                    result = 1
+            except Exception:  # noqa: BLE001 - cleanup errors are normalized.
+                result = 1
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -218,11 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     mdns_p.add_argument("--timeout", type=_positive_timeout, default=5.0)
     mdns_p.set_defaults(func=cmd_mdns)
 
+    ui_p = sub.add_parser("ui", help="Open the local browser interface (development preview)")
+    ui_p.set_defaults(func=cmd_ui)
+
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    maybe_reexec_macos_system_python(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:

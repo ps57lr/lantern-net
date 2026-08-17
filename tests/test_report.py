@@ -20,4 +20,4 @@ def test_redaction_removes_identifiers_but_keeps_diagnostic_ips():
     assert "Family WiFi" not in rendered
     assert "aa:bb:cc:dd:ee:ff" not in rendered
     assert "192.168.1.1" in rendered
-    assert payload["schema_version"] == "1.0"
+    assert payload["schema_version"] == "1.1"

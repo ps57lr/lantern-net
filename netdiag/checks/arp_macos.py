@@ -7,8 +7,9 @@ import ctypes
 import ctypes.util
 import json
 import socket
-import sys
 from dataclasses import dataclass
+
+from netdiag.terminal import terminal_safe
 
 CTL_NET = 4
 PF_ROUTE = 17
@@ -72,9 +73,11 @@ def _parse_mac(raw: bytes, offset: int) -> str | None:
         return None
     name_len = raw[offset + 5]
     addr_len = raw[offset + 6]
+    if addr_len != 6:
+        return None
     start = offset + 8 + name_len
     mac = raw[start : start + addr_len]
-    if not mac:
+    if len(mac) != 6 or mac == bytes(6) or mac == bytes([0xFF]) * 6 or mac[0] & 1:
         return None
     return ":".join(f"{byte:02x}" for byte in mac)
 
@@ -164,7 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(entries))
     else:
         for entry in entries:
-            print(f"{entry['ip']}\t{entry['mac']}\t{entry['ifindex']}")
+            print(
+                f"{terminal_safe(entry['ip'])}\t{terminal_safe(entry['mac'])}\t"
+                f"{terminal_safe(entry['ifindex'])}"
+            )
     return 0
 
 

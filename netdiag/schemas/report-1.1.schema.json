@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lantern-net.example/schemas/report-1.1.schema.json",
+  "title": "Lantern netdiag report 1.1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "tool_version",
+    "report_id",
+    "hostname",
+    "os",
+    "started_at",
+    "duration_ms",
+    "status",
+    "outcome",
+    "assessment",
+    "severity",
+    "coverage",
+    "findings",
+    "checks",
+    "evidence",
+    "access_prerequisites",
+    "remediation",
+    "data",
+    "redacted"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.1"},
+    "tool_version": {"type": "string", "minLength": 1},
+    "report_id": {"type": "string", "pattern": "^report-[0-9a-f]{32}$"},
+    "hostname": {"type": "string"},
+    "os": {
+      "type": "object",
+      "required": ["system", "release", "machine"],
+      "properties": {
+        "system": {"type": "string"},
+        "release": {"type": "string"},
+        "machine": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "started_at": {"type": "string"},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "status": {"$ref": "#/$defs/executionStatus"},
+    "outcome": {"$ref": "#/$defs/outcomeStatus"},
+    "assessment": {"type": "string", "minLength": 1},
+    "severity": {"$ref": "#/$defs/severity"},
+    "coverage": {"$ref": "#/$defs/coverage"},
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"}
+    },
+    "checks": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/check"}
+    },
+    "evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/evidence"}
+    },
+    "access_prerequisites": {"type": "array"},
+    "remediation": {
+      "type": "object",
+      "required": ["available_actions", "attempts"],
+      "properties": {
+        "available_actions": {"type": "array"},
+        "attempts": {"type": "array"}
+      },
+      "additionalProperties": true
+    },
+    "data": {"type": "object"},
+    "redacted": {"type": "boolean"}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "severity": {"enum": ["ok", "info", "warn", "crit"]},
+    "executionStatus": {
+      "enum": ["completed", "partial", "failed", "cancelled", "not_run"]
+    },
+    "outcomeStatus": {
+      "enum": [
+        "healthy",
+        "informational",
+        "degraded",
+        "failed",
+        "blocked",
+        "inconclusive",
+        "not_tested",
+        "unsupported",
+        "permission_denied",
+        "cancelled"
+      ]
+    },
+    "confidence": {
+      "type": "object",
+      "required": ["level", "rationale", "evidence_refs"],
+      "properties": {
+        "level": {"enum": ["low", "medium", "high"]},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "finding_id",
+        "code",
+        "severity",
+        "status",
+        "confidence",
+        "category",
+        "title",
+        "detail",
+        "hint",
+        "data",
+        "evidence_refs",
+        "remediation_refs"
+      ],
+      "properties": {
+        "finding_id": {"type": "string", "minLength": 1},
+        "code": {
+          "oneOf": [
+            {"type": "string", "pattern": "^NDG(?:\\.[A-Z][A-Z0-9_]*){2,}$"},
+            {"type": "null"}
+          ]
+        },
+        "severity": {"$ref": "#/$defs/severity"},
+        "status": {"$ref": "#/$defs/outcomeStatus"},
+        "confidence": {"$ref": "#/$defs/confidence"},
+        "category": {"type": "string", "minLength": 1},
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "hint": {"type": "string"},
+        "data": {"type": "object"},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "remediation_refs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["code", "message", "retryable", "native_exit_code"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "maxLength": 1024},
+            "retryable": {"type": "boolean"},
+            "native_exit_code": {"type": ["integer", "null"]}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "coverage": {
+      "type": "object",
+      "required": ["status", "planned", "completed", "partial", "failed", "cancelled", "not_run"],
+      "properties": {
+        "status": {"enum": ["complete", "partial", "none"]},
+        "planned": {"type": "integer", "minimum": 0},
+        "completed": {"type": "integer", "minimum": 0},
+        "partial": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "cancelled": {"type": "integer", "minimum": 0},
+        "not_run": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "check": {
+      "type": "object",
+      "required": [
+        "check_id",
+        "category",
+        "execution_status",
+        "outcome_status",
+        "duration_ms",
+        "evidence_refs",
+        "error"
+      ],
+      "properties": {
+        "check_id": {"type": "string", "minLength": 1},
+        "category": {"type": "string", "minLength": 1},
+        "execution_status": {"$ref": "#/$defs/executionStatus"},
+        "outcome_status": {"$ref": "#/$defs/outcomeStatus"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "evidence_refs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "error": {"$ref": "#/$defs/error"}
+      },
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "evidence_id",
+        "kind",
+        "check_id",
+        "status",
+        "source",
+        "observed_at",
+        "duration_ms",
+        "payload",
+        "error",
+        "sensitivity"
+      ],
+      "properties": {
+        "evidence_id": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "check_id": {"type": "string", "minLength": 1},
+        "status": {"$ref": "#/$defs/outcomeStatus"},
+        "source": {"type": "string", "minLength": 1},
+        "observed_at": {"type": "string"},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "payload": {},
+        "error": {"$ref": "#/$defs/error"},
+        "sensitivity": {
+          "enum": [
+            "public",
+            "network_address",
+            "device_identifier",
+            "user_identifier",
+            "potential_secret"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

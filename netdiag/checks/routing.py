@@ -8,6 +8,8 @@ import socket
 import subprocess
 from dataclasses import dataclass
 
+from netdiag.catalog import make_finding
+from netdiag.core.status import ConfidenceLevel, OutcomeStatus
 from netdiag.findings import Finding, Severity
 from netdiag.platform import OSInfo, first_match, run, run_ok, which
 
@@ -25,6 +27,8 @@ class RouteInfo:
     default_gateway: str | None
     default_iface: str | None
     interfaces: list[Interface]
+    has_default_route: bool | None = None
+    collector_status: str = "ok"
 
 
 def _ping_host(host: str, count: int = 3) -> tuple[bool, str]:
@@ -44,11 +48,21 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
     interfaces: list[Interface] = []
     gateway: str | None = None
     iface: str | None = None
+    has_default_route = False
+    collector_status = "ok"
 
     if osinfo.is_mac:
         text = run_ok(["route", "-n", "get", "default"], timeout=10)
-        gateway = first_match(r"^\s*gateway:\s*(\d+\.\d+\.\d+\.\d+)", text)
-        iface = first_match(r"^\s*interface:\s*(\S+)", text)
+        if text.startswith("(command failed:"):
+            collector_status = "failed"
+            has_default_route = None
+        else:
+            gateway = first_match(r"^\s*gateway:\s*(\d+\.\d+\.\d+\.\d+)", text)
+            iface = first_match(r"^\s*interface:\s*(\S+)", text)
+            has_default_route = bool(gateway or iface)
+            if not has_default_route:
+                collector_status = "failed"
+                has_default_route = None
         if_text = run_ok(["ifconfig"], timeout=10)
         for block in re.split(r"\n(?=\S)", if_text):
             name = block.split(":")[0].split()[0]
@@ -63,14 +77,23 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                     try:
                         if mask.startswith("0x"):
                             mask = str(ipaddress.IPv4Address(int(mask, 16)))
-                        networks.append(str(ipaddress.ip_network(f"{address}/{mask}", strict=False)))
+                        networks.append(
+                            str(ipaddress.ip_network(f"{address}/{mask}", strict=False))
+                        )
                     except ValueError:
                         continue
                 interfaces.append(Interface(name, addrs, state, networks))
     else:
         text = run_ok(["ip", "-4", "route"], timeout=10)
-        gateway = first_match(r"default via (\d+\.\d+\.\d+\.\d+)", text)
-        iface = first_match(r"default via \d+\.\d+\.\d+\.\d+ dev (\S+)", text)
+        if text.startswith("(command failed:"):
+            collector_status = "failed"
+            has_default_route = None
+        else:
+            default_line = first_match(r"^(default\b.*)$", text)
+            has_default_route = default_line is not None
+            if default_line:
+                gateway = first_match(r"\bvia (\d+\.\d+\.\d+\.\d+)", default_line)
+                iface = first_match(r"\bdev (\S+)", default_line)
         addr_text = run_ok(["ip", "-4", "addr"], timeout=10)
         for block in re.split(r"\n(?=\d+:)", addr_text):
             m = re.match(r"\d+:\s+(\S+?):", block)
@@ -86,14 +109,16 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                         networks.append(str(ipaddress.ip_network(cidr, strict=False)))
                     except ValueError:
                         continue
-                interfaces.append(Interface(name, addrs, "up" if "UP" in block else "down", networks))
+                interfaces.append(
+                    Interface(name, addrs, "up" if "UP" in block else "down", networks)
+                )
 
-    return RouteInfo(gateway, iface, interfaces)
+    return RouteInfo(gateway, iface, interfaces, has_default_route, collector_status)
 
 
 def is_virtual_bridge_interface(name: str) -> bool:
     lower = name.lower()
-    return lower == "docker0" or lower.startswith("br-") or lower.startswith("virbr")
+    return lower == "docker0" or lower.startswith(("br-", "virbr"))
 
 
 def _private_ipv4_network(network: str) -> ipaddress.IPv4Network | None:
@@ -132,12 +157,31 @@ def local_ipv4_networks(osinfo: OSInfo) -> list[ipaddress.IPv4Network]:
     return [primary] if primary is not None else []
 
 
-def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
+def check_routing(osinfo: OSInfo, *, network_probes: bool = True) -> tuple[list[Finding], dict]:
+    """Inspect routing state and, when authorized, test bounded connectivity.
+
+    ``network_probes=False`` is the passive contract used by Lantern's
+    consent-bound application runtime.  It reads only local route/interface
+    state and returns before any gateway or public ICMP/TCP traffic can be
+    emitted.  The default remains ``True`` for the explicitly-invoked legacy
+    CLI route command.
+    """
+
+    if not isinstance(network_probes, bool):
+        raise TypeError("network_probes must be a boolean")
     findings: list[Finding] = []
     routes = get_routes(osinfo)
+    has_default_route = None
+    if routes.collector_status == "ok":
+        has_default_route = (
+            routes.has_default_route
+            if routes.has_default_route is not None
+            else bool(routes.default_gateway or routes.default_iface)
+        )
     data = {
         "default_gateway": routes.default_gateway,
         "default_interface": routes.default_iface,
+        "has_default_route": has_default_route,
         "interfaces": [
             {
                 "name": i.name,
@@ -147,23 +191,61 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
             }
             for i in routes.interfaces
         ],
+        "network_probes": network_probes,
+        "collector_status": routes.collector_status,
     }
 
-    if not routes.default_gateway:
+    if routes.collector_status != "ok":
+        data["connectivity_status"] = "not_run"
         findings.append(
-            Finding(
-                Severity.CRIT,
-                "route",
-                "No default gateway",
-                "This machine has no default route — no internet.",
-                hint="Check cable/Wi‑Fi association and DHCP.",
+            make_finding(
+                "NDG.ROUTE.CHECK_FAILED",
+                Severity.WARN,
+                OutcomeStatus.INCONCLUSIVE,
+                parameters={"error_summary": "local route inventory was unavailable"},
+                confidence=ConfidenceLevel.HIGH,
+                rationale="The fixed platform route command did not provide usable inventory.",
             )
         )
         return findings, data
 
-    ok, ping_out = _ping_host(routes.default_gateway, count=3)
-    data["gateway_ping"] = {"ok": ok, "output": ping_out}
-    gateway_ping_ok = ok
+    if not has_default_route:
+        findings.append(
+            make_finding(
+                "NDG.ROUTE.DEFAULT_ROUTE_MISSING",
+                Severity.WARN,
+                OutcomeStatus.INCONCLUSIVE,
+                confidence=ConfidenceLevel.HIGH,
+                rationale="The inspected IPv4 route table contained no default route.",
+            )
+        )
+        return findings, data
+
+    if not network_probes:
+        data["connectivity_status"] = "not_run"
+        findings.append(
+            make_finding(
+                "NDG.ROUTE.DEFAULT_ROUTE_OBSERVED",
+                Severity.INFO,
+                OutcomeStatus.INFORMATIONAL,
+                confidence=ConfidenceLevel.HIGH,
+                rationale=(
+                    "The IPv4 route table exposed a default route; no network probe was run."
+                ),
+            )
+        )
+        return findings, data
+
+    gateway_ping_ok: bool | None = None
+    ping_out = ""
+    if routes.default_gateway:
+        gateway_ping_ok, ping_out = _ping_host(routes.default_gateway, count=3)
+        data["gateway_ping"] = {"ok": gateway_ping_ok, "output": ping_out}
+    else:
+        data["gateway_ping"] = {
+            "ok": None,
+            "output": "No next-hop address is present on this default route.",
+        }
 
     # External connectivity
     ping_results: list[tuple[str, str, bool, str]] = []
@@ -186,60 +268,87 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
     data["tcp_443_errors"] = tcp_attempts
     if tcp_target:
         findings.append(
-            Finding(
+            make_finding(
+                "NDG.ROUTE.OUTBOUND_HTTPS_REACHABLE",
                 Severity.OK,
-                "route",
-                "Outbound TCP/443 works",
-                f"Internet path appears up via {tcp_target}.",
+                OutcomeStatus.HEALTHY,
+                parameters={"target": tcp_target},
+                confidence=ConfidenceLevel.HIGH,
+                rationale="A TCP connection to a public endpoint completed.",
             )
         )
     else:
         findings.append(
-            Finding(
+            make_finding(
+                "NDG.ROUTE.OUTBOUND_HTTPS_FAILED",
                 Severity.WARN,
-                "route",
-                "Outbound TCP/443 failed",
-                "; ".join(f"{host}: {error}" for host, error in tcp_attempts.items()),
-                hint="Check firewall, captive portal, or WAN outage.",
+                OutcomeStatus.DEGRADED,
+                confidence=ConfidenceLevel.MEDIUM,
+                rationale="Both bounded TCP connection attempts failed.",
             )
         )
 
     internet_ok = bool(data["tcp_443"])
-    if gateway_ping_ok:
+    if gateway_ping_ok is True:
         findings.insert(
             0,
-            Finding(
+            make_finding(
+                "NDG.ROUTE.GATEWAY_REACHABLE",
                 Severity.OK,
-                "route",
-                f"Default gateway reachable ({routes.default_gateway})",
-                f"Via {routes.default_iface or 'unknown interface'}",
+                OutcomeStatus.HEALTHY,
+                parameters={
+                    "gateway": routes.default_gateway,
+                    "interface": routes.default_iface or "unknown interface",
+                },
+                confidence=ConfidenceLevel.HIGH,
+                rationale="The default gateway answered an ICMP echo probe.",
+            ),
+        )
+    elif gateway_ping_ok is False:
+        gateway_code = (
+            "NDG.ROUTE.GATEWAY_ICMP_UNANSWERED_PATH_UP"
+            if internet_ok
+            else "NDG.ROUTE.GATEWAY_ICMP_UNANSWERED_PATH_UNCONFIRMED"
+        )
+        findings.insert(
+            0,
+            make_finding(
+                gateway_code,
+                Severity.INFO if internet_ok else Severity.WARN,
+                OutcomeStatus.INCONCLUSIVE if internet_ok else OutcomeStatus.DEGRADED,
+                parameters={"gateway": routes.default_gateway},
+                confidence=ConfidenceLevel.HIGH if internet_ok else ConfidenceLevel.MEDIUM,
+                rationale="Gateway ICMP did not answer and was compared with the TCP path.",
             ),
         )
     else:
         findings.insert(
             0,
-            Finding(
-                Severity.INFO if internet_ok else Severity.WARN,
-                "route",
-                f"Default gateway did not answer ping ({routes.default_gateway})",
-                ping_out,
-                hint=(
-                    "Internet still works; the router likely blocks ICMP."
-                    if internet_ok
-                    else "Check the router, local link, VLAN, and DHCP settings."
-                ),
+            make_finding(
+                "NDG.ROUTE.DEFAULT_ROUTE_NO_EXPLICIT_NEXT_HOP",
+                Severity.INFO,
+                OutcomeStatus.INFORMATIONAL,
+                parameters={"interface": routes.default_iface or "unknown interface"},
+                confidence=ConfidenceLevel.HIGH,
+                rationale="The default route had an interface but no explicit next-hop address.",
             ),
         )
 
     for label, host, ping_ok, out in ping_results:
         if not ping_ok:
+            ping_code = (
+                "NDG.ROUTE.EXTERNAL_ICMP_UNANSWERED_PATH_UP"
+                if internet_ok
+                else "NDG.ROUTE.EXTERNAL_ICMP_UNANSWERED_PATH_UNCONFIRMED"
+            )
             findings.append(
-                Finding(
+                make_finding(
+                    ping_code,
                     Severity.INFO if internet_ok else Severity.WARN,
-                    "route",
-                    f"Cannot ping {label} ({host})",
-                    out[:300],
-                    hint="ICMP may be blocked; TCP and DNS checks are more conclusive.",
+                    OutcomeStatus.INCONCLUSIVE if internet_ok else OutcomeStatus.DEGRADED,
+                    parameters={"label": label, "target": host},
+                    confidence=ConfidenceLevel.HIGH if internet_ok else ConfidenceLevel.MEDIUM,
+                    rationale="ICMP behavior was compared with a bounded TCP connection test.",
                 )
             )
 

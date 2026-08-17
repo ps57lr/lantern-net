@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#12233f">
+    <meta name="description" content="Lantern explains this computer's network health using local, consent-based checks.">
+    <title>Lantern · Local network diagnosis</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to results</a>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <button
+          class="icon-button menu-toggle"
+          id="menu-toggle"
+          type="button"
+          aria-label="Open navigation"
+          aria-controls="primary-sidebar"
+          aria-expanded="false"
+        >
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#menu"></use></svg>
+        </button>
+
+        <button class="brand" type="button" data-view-target="overview" aria-label="Lantern overview">
+          <span class="brand-mark" aria-hidden="true">
+            <svg class="brand-icon"><use href="icons.svg#lantern"></use></svg>
+          </span>
+          <span class="brand-copy">
+            <strong>Lantern</strong>
+            <small>Developer preview</small>
+          </span>
+        </button>
+
+        <div class="topbar-actions">
+          <span class="local-badge">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#lock"></use></svg>
+            Loopback only
+          </span>
+          <button class="quiet-button" id="new-check-button" type="button" disabled>
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#scan"></use></svg>
+            New check
+          </button>
+          <button class="quiet-button quiet-button-small" id="end-session-button" type="button" disabled>
+            End local session
+          </button>
+        </div>
+      </header>
+
+      <aside class="sidebar" id="primary-sidebar" aria-label="Lantern navigation" aria-hidden="true" inert>
+        <nav class="primary-nav" aria-label="Primary">
+          <p class="nav-label">Diagnose</p>
+          <button class="nav-item is-current" type="button" data-view-target="overview" aria-current="page">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#overview"></use></svg>
+            <span>Overview</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="device">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#device"></use></svg>
+            <span>This device</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="network">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#network"></use></svg>
+            <span>Network path</span>
+          </button>
+
+          <div class="nav-subgroup" aria-label="Network modules">
+            <button class="nav-item nav-item-sub" type="button" data-view-target="route">Route</button>
+            <button class="nav-item nav-item-sub" type="button" data-view-target="wifi">Wi-Fi</button>
+            <button class="nav-item nav-item-sub" type="button" data-view-target="dns">DNS</button>
+            <button class="nav-item nav-item-sub" type="button" data-view-target="lan">LAN</button>
+            <button class="nav-item nav-item-sub" type="button" data-view-target="mdns">mDNS</button>
+            <button class="nav-item nav-item-sub" type="button" data-view-target="ports">Ports</button>
+          </div>
+
+          <p class="nav-label nav-label-spaced">Act safely</p>
+          <button class="nav-item" type="button" data-view-target="fixes">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#wrench"></use></svg>
+            <span>Fixes</span>
+            <span class="nav-note">Unavailable</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="rescue">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#rescue"></use></svg>
+            <span>Rescue guidance</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="session">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#session"></use></svg>
+            <span>LAN session</span>
+            <span class="nav-note">Unavailable</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="share" disabled>
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#share"></use></svg>
+            <span>Share</span>
+            <span class="nav-note">Disabled</span>
+          </button>
+        </nav>
+
+        <section class="privacy-note" aria-labelledby="privacy-title">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#shield"></use></svg>
+          <div>
+            <h2 id="privacy-title">Stays on this computer</h2>
+            <p>The interface talks only to Lantern on this device. No report upload is available.</p>
+          </div>
+        </section>
+        <button class="secondary-button sidebar-session-button" id="mobile-end-session-button" type="button" disabled>
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#lock"></use></svg>
+          End local session
+        </button>
+      </aside>
+
+      <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
+
+      <main class="main-content" id="main-content" tabindex="-1">
+        <div class="page-frame">
+          <header class="page-heading">
+            <div>
+              <p class="eyebrow" id="page-eyebrow">Diagnosis</p>
+              <h1 id="page-title" tabindex="-1">Overview</h1>
+              <p class="page-description" id="page-description">A local, evidence-bounded view of this device and its network path.</p>
+            </div>
+            <span class="connection-state" id="connection-state">Connecting locally…</span>
+          </header>
+
+          <section class="notice notice-info" id="session-notice" tabindex="-1" aria-live="polite" aria-atomic="true">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#info"></use></svg>
+            <p id="session-message">Opening a private local session…</p>
+          </section>
+          <p class="sr-only" id="run-announcement" aria-live="polite" aria-atomic="true"></p>
+
+          <section class="run-progress is-hidden" id="run-progress" aria-labelledby="run-progress-title">
+            <div class="progress-copy">
+              <span class="progress-orbit" aria-hidden="true"></span>
+              <div>
+                <h2 id="run-progress-title">Checking this device</h2>
+                <p id="run-progress-detail">Waiting for the first diagnostic step…</p>
+              </div>
+              <strong id="run-progress-value">0%</strong>
+            </div>
+            <div
+              class="progress-track"
+              id="progress-track"
+              role="progressbar"
+              aria-label="Diagnostic progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="run-progress-bar"></span>
+            </div>
+            <button class="secondary-button" id="cancel-button" type="button">Cancel check</button>
+          </section>
+
+          <div id="page-content" aria-live="off">
+            <section class="panel loading-shell" aria-labelledby="loading-title">
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div>
+                <h2 id="loading-title">Connecting to Lantern</h2>
+                <p>The local interface is waiting for an authenticated status snapshot.</p>
+              </div>
+            </section>
+          </div>
+        </div>
+      </main>
+
+      <nav class="mobile-nav" aria-label="Quick navigation">
+        <button class="mobile-nav-item is-current" type="button" data-view-target="overview" aria-current="page">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#overview"></use></svg>
+          <span>Overview</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view-target="network">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#network"></use></svg>
+          <span>Network</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view-target="rescue">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#rescue"></use></svg>
+          <span>Rescue</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view-target="fixes">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#wrench"></use></svg>
+          <span>Fixes</span>
+        </button>
+      </nav>
+    </div>
+  </body>
+</html>

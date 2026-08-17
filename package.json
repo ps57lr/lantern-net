@@ -1,0 +1,13 @@
+{
+  "name": "lantern-net-browser-tests",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.7.0",
+  "scripts": {
+    "test:browser": "playwright test --config playwright.config.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.12.1",
+    "@playwright/test": "1.62.1"
+  }
+}
