@@ -7,40 +7,39 @@ import json
 import sys
 
 from netdiag import __version__
-from netdiag.checks.dns import analyze_answers, compare_resolvers, system_resolvers
+from netdiag.checks.dns import (
+    MAX_RESOLVERS,
+    SYSTEM_RESOLVER,
+    analyze_answers,
+    compare_resolvers,
+    normalize_query_name,
+    normalize_resolver,
+    system_resolvers,
+)
 from netdiag.checks.lan import scan_lan
 from netdiag.checks.mdns import browse_mdns
 from netdiag.checks.ports import scan_ports
 from netdiag.checks.routing import check_routing
 from netdiag.checks.wifi import check_wifi
-from netdiag.findings import Finding, exit_code, worst_severity
+from netdiag.findings import Finding, exit_code
 from netdiag.platform import detect_os, maybe_reexec_macos_system_python, which
+from netdiag.presentation import serialize_command_result
 from netdiag.report import print_report
 from netdiag.scanner import report_exit_code, run_full_scan
+from netdiag.terminal import terminal_safe
 
 
-def _json_result(findings: list[Finding], data: dict) -> None:
-    print(
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "tool_version": __version__,
-                "severity": worst_severity(findings).value,
-                "findings": [f.to_dict() for f in findings],
-                "data": data,
-            },
-            indent=2,
-        )
-    )
+def _json_result(findings: list[Finding], data: dict, *, category: str) -> None:
+    print(json.dumps(serialize_command_result(findings, data, category=category), indent=2))
 
 
 def _print_findings(findings: list[Finding]) -> None:
     for finding in findings:
-        print(f"[{finding.severity.value.upper()}] {finding.title}")
+        print(f"[{finding.severity.value.upper()}] {terminal_safe(finding.title)}")
         if finding.detail:
-            print(f"  {finding.detail}")
+            print(f"  {terminal_safe(finding.detail)}")
         if finding.hint:
-            print(f"  → {finding.hint}")
+            print(f"  → {terminal_safe(finding.hint)}")
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -75,28 +74,49 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_dns(args: argparse.Namespace) -> int:
     osinfo = detect_os()
-    domain = args.domain
-    if args.resolvers:
-        resolvers = [r.strip() for r in args.resolvers.split(",") if r.strip()]
-        if not resolvers:
-            print("netdiag: --resolvers must contain at least one resolver", file=sys.stderr)
+    domain = normalize_query_name(args.domain)
+    if domain is None:
+        print("netdiag: domain must be a valid DNS name or IP address", file=sys.stderr)
+        return 2
+    if args.resolvers is not None:
+        requested = [item.strip() for item in args.resolvers.split(",") if item.strip()]
+        resolvers = [normalized for item in requested if (normalized := normalize_resolver(item))]
+        if (
+            not requested
+            or len(resolvers) != len(requested)
+            or len(set(resolvers)) != len(resolvers)
+            or len(resolvers) > MAX_RESOLVERS
+        ):
+            print(
+                f"netdiag: --resolvers requires 1-{MAX_RESOLVERS} unique IPv4/IPv6 address literals",
+                file=sys.stderr,
+            )
             return 2
     else:
         configured = system_resolvers(osinfo)
-        resolvers = configured if configured and which("dig") else ["system"]
+        resolvers = configured if configured and which("dig") else [SYSTEM_RESOLVER]
 
     answers = compare_resolvers(domain, resolvers)
     findings = analyze_answers(domain, answers)
     if args.json:
-        _json_result(findings, {"domain": domain, "answers": [a.to_dict() for a in answers]})
+        _json_result(
+            findings,
+            {"domain": domain, "answers": [a.to_dict() for a in answers]},
+            category="dns",
+        )
         return exit_code(findings)
 
-    print(f"DNS compare: {domain}\n")
+    print(f"DNS compare: {terminal_safe(domain)}\n")
     for a in answers:
-        status = ", ".join(a.addresses) if a.addresses else f"ERROR: {a.error}"
+        status = (
+            ", ".join(terminal_safe(address) for address in a.addresses)
+            if a.addresses
+            else "ERROR: no usable IPv4 answer was returned"
+        )
         flag = " [BLOCKED?]" if a.blocked else ""
         latency = f" ({a.response_ms} ms)" if a.response_ms is not None else ""
-        print(f"  @{a.resolver:17} → {status}{flag}{latency}")
+        resolver = terminal_safe(a.resolver)
+        print(f"  @{resolver:17} → {status}{flag}{latency}")
 
     if findings:
         print()
@@ -108,7 +128,7 @@ def cmd_wifi(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = check_wifi(osinfo)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="wifi")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -118,7 +138,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = check_routing(osinfo)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="routing")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -128,7 +148,7 @@ def cmd_lan(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = scan_lan(osinfo, do_ping=args.ping, max_hosts=args.max_hosts)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="lan")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -147,7 +167,7 @@ def cmd_ports(args: argparse.Namespace) -> int:
             return 2
     findings, data = scan_ports(args.host, ports=ports)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="ports")
     else:
         _print_findings(findings)
     return exit_code(findings)
@@ -157,7 +177,7 @@ def cmd_mdns(args: argparse.Namespace) -> int:
     osinfo = detect_os()
     findings, data = browse_mdns(osinfo, timeout=args.timeout)
     if args.json:
-        _json_result(findings, data)
+        _json_result(findings, data, category="mdns")
     else:
         _print_findings(findings)
     return exit_code(findings)

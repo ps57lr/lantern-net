@@ -1,0 +1,1 @@
+"""Bundled external data contracts."""

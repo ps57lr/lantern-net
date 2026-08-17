@@ -75,5 +75,38 @@ def test_point_to_point_route_continues_external_connectivity_checks():
         findings, data = check_routing(LINUX)
     assert data["tcp_443"] is True
     assert findings[0].severity == Severity.INFO
-    assert "point-to-point" in findings[0].title.lower()
+    assert findings[0].code == "NDG.ROUTE.DEFAULT_ROUTE_NO_EXPLICIT_NEXT_HOP"
+    assert "no explicit next-hop" in findings[0].title.lower()
     assert not any(f.severity == Severity.CRIT for f in findings)
+
+
+def test_linux_on_link_default_route_is_detected_without_calling_it_point_to_point():
+    routes = "default dev eth0 proto static scope link\n"
+    addresses = "2: eth0: <BROADCAST,MULTICAST,UP>\n    inet 192.0.2.10/24 scope global eth0\n"
+    with patch("netdiag.checks.routing.run_ok", side_effect=[routes, addresses]):
+        parsed = get_routes(LINUX)
+    assert parsed.has_default_route is True
+    assert parsed.default_iface == "eth0"
+    assert parsed.default_gateway is None
+
+
+def test_passive_routing_inventory_never_emits_icmp_or_tcp() -> None:
+    route_info = RouteInfo(
+        "192.168.1.1",
+        "en0",
+        [],
+        True,
+    )
+    with (
+        patch("netdiag.checks.routing.get_routes", return_value=route_info),
+        patch("netdiag.checks.routing._ping_host") as ping,
+        patch("netdiag.checks.routing.socket.create_connection") as tcp,
+    ):
+        findings, data = check_routing(MAC, network_probes=False)
+
+    ping.assert_not_called()
+    tcp.assert_not_called()
+    assert findings == []
+    assert data["has_default_route"] is True
+    assert data["network_probes"] is False
+    assert data["connectivity_status"] == "not_run"

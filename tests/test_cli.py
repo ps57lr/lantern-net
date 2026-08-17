@@ -33,3 +33,33 @@ def test_dns_exit_status_uses_displayed_comparison(monkeypatch, capsys):
     )
     assert cli.main(["dns", "example.com"]) == 1
     assert "resolves inconsistently" in capsys.readouterr().out
+
+
+def test_dns_rejects_invalid_resolver_without_echoing_it(monkeypatch, capsys):
+    called = False
+
+    def compare(*_args):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(cli, "compare_resolvers", compare)
+    assert cli.main(["dns", "example.com", "--resolvers", "password=hunter2"]) == 2
+    captured = capsys.readouterr()
+    assert "password=hunter2" not in captured.err
+    assert not called
+
+
+def test_dns_rejects_option_like_domain_without_running_query(monkeypatch, capsys):
+    called = False
+
+    def compare(*_args):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(cli, "compare_resolvers", compare)
+    assert cli.main(["dns", "+trace", "--resolvers", "1.1.1.1"]) == 2
+    captured = capsys.readouterr()
+    assert "+trace" not in captured.err
+    assert not called

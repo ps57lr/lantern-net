@@ -1,56 +1,93 @@
-# netdiag
+# Lantern Net (`netdiag`)
 
-`netdiag` is a read-only network troubleshooting CLI for macOS and Linux. It works from the physical link outward—local interface, router, internet path, DNS, Wi-Fi, nearby devices, and common gateway services—and turns probe results into plain-language findings and next steps.
+Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working product today is the `netdiag` command-line utility for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
 
-It is designed for helping family remotely today and for stable machine integration later: no runtime dependencies, no root requirement for normal checks, bounded timeouts, deterministic JSON, documented exit codes, and failure isolation between probes.
+> **Development status:** the current package is `0.3.0.dev0`. It is not production software, a remote-support service, or an automatic repair tool. Use it only on computers and networks you own or are authorized to test.
 
-## Install
+## What works today
 
-```bash
-cd ~/Projects/netdiag
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
+- A usable macOS and Linux CLI with bounded network probes and per-check failure isolation.
+- Human-readable reports with an overall assessment, coverage, findings, and suggested next steps.
+- Typed JSON reports using the additive `1.1` report schema, including stable finding codes, structured evidence, confidence, and check outcomes.
+- A share-safe `--redact` mode for full reports. It structurally removes or replaces sensitive identifiers instead of relying on text replacement.
+- Passive neighbor discovery scoped to the detected local interface and network, with the discovery source and status recorded.
+- Explicit opt-in for LAN ping sweeps and explicit targets for port checks.
+
+The project also contains safety foundations for the intended future product. These are not yet connected end-user features:
+
+- A consent-bound application runtime with fixed diagnostic activity levels and cancellation support.
+- A packaged modern UI prototype and a hardened loopback-only transport. The UI is intentionally disconnected from the CLI while its launch and session flow is completed and tested.
+- A typed remediation planner and dry-run lifecycle. No real machine-changing repair is registered, and there is no `apply` command or credential collection.
+- Read-only rescue assessment models and reviewed manual guidance. Lantern does not currently boot a computer, enter Safe Mode or Recovery, repair a disk, unlock encrypted data, or determine hardware viability on its own.
+- Security building blocks for a future LAN support mode. Non-loopback serving is hard-disabled, so this build cannot expose Lantern to another device on the network.
+
+There is no USB launcher or automatic execution in this build, and Windows diagnostic parity has not been implemented.
+
+## Install for development
 
 Python 3.10 or newer is required.
 
-## Fastest support workflow
+```bash
+git clone https://github.com/ps57lr/lantern-net.git
+cd lantern-net
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
 
-Ask the person at the affected computer to run:
+This is an editable development install, not a signed or notarized release package. On Linux, activate the virtual environment with the equivalent command for your shell.
+
+Confirm the installed build:
+
+```bash
+netdiag --version
+```
+
+## Run and share a report
+
+For a normal local troubleshooting session:
+
+```bash
+netdiag run
+```
+
+For a report you intend to send to someone helping you:
 
 ```bash
 netdiag run --redact
 ```
 
-The report keeps the network addresses needed for diagnosis but hides hostnames, Wi-Fi names, service instance names, BSSIDs, and MAC addresses. Copy the complete output into a message.
-
-For an automated support bundle:
+For a machine-readable support file:
 
 ```bash
 netdiag run --json --redact > netdiag-report.json
 ```
+
+`--redact` hides hostnames, Wi-Fi names, service instance names, BSSIDs, MAC addresses, and other classified identifiers. Local and gateway IP addresses may remain because they are often necessary for network diagnosis. Review any report before sharing it; redaction reduces exposure but is not a substitute for choosing a trusted support channel.
 
 ## Commands
 
 | Command | What it checks |
 |---|---|
 | `netdiag run` | Full layered diagnostic report |
-| `netdiag dns [DOMAIN]` | Resolver answers, blocking, failures, and response time |
-| `netdiag wifi` | Association, signal, band, channel, rate, and security |
-| `netdiag route` | Interfaces, default gateway, ICMP, and outbound HTTPS path |
-| `netdiag lan` | Passive ARP/neighbor discovery scoped to the default interface/LAN |
+| `netdiag dns [DOMAIN]` | Resolver answers, likely blocking, failures, and response time |
+| `netdiag wifi` | Association, signal, band, channel, rate, and security when the platform exposes them |
+| `netdiag route` | Interfaces, default gateway, ICMP behavior, and outbound HTTPS path |
+| `netdiag lan` | Passive ARP/neighbor discovery scoped to the default interface and LAN |
 | `netdiag lan --ping` | Active ping discovery, limited to 256 hosts by default |
-| `netdiag ports HOST` | Bounded TCP check of common management/service ports |
+| `netdiag ports HOST` | Bounded TCP check of common management and service ports on one explicit host |
 | `netdiag mdns` | Bounded Bonjour/Avahi service-type discovery |
 
-Every subcommand supports `--json`. Run `netdiag COMMAND --help` for command-specific options.
+Every subcommand supports `--json`. The share-safe `--redact` option currently applies to the full `run` report. Run `netdiag COMMAND --help` for command-specific options.
 
-## Examples
+Examples:
 
 ```bash
 # Compare a local Pi-hole with a public resolver
 netdiag dns nest.com --resolvers 192.168.0.183,1.1.1.1
+
+# Inspect Wi-Fi details available to this computer
+netdiag wifi
 
 # Check a router's common TCP services
 netdiag ports 192.168.0.1
@@ -58,49 +95,55 @@ netdiag ports 192.168.0.1
 # Check only selected ports
 netdiag ports 192.168.0.1 --ports 53,80,443
 
-# Actively scan a /24 LAN; large networks are refused by the safety limit
+# Actively scan a local /24; larger networks are refused by the default limit
 netdiag lan --ping
 ```
 
-## How to read the result
+## Understand the result
 
 - `OK` — the tested path worked.
-- `INFO` — useful context, not a health problem.
+- `INFO` — useful context, not necessarily a health problem.
 - `WARN` — degraded or inconclusive; follow the printed next step.
-- `CRIT` — a foundational function such as the default route or all tested DNS resolution failed.
+- `CRIT` — a foundational function, such as the default route or all tested DNS resolution, failed.
 
-Exit codes are `0` for healthy/informational, `1` for warnings, and `2` for critical findings or invalid CLI input. A gateway that ignores ping is not automatically considered down: if outbound TCP works, it is reported as information because many routers block ICMP.
+Coverage is reported separately from severity. A partial or unsupported check is not silently treated as healthy. A gateway that ignores ping is also not automatically considered down: if outbound TCP works, Lantern reports that behavior as information because many routers block ICMP.
 
-## JSON contract
+Exit codes are `0` for healthy or informational results, `1` for warnings, and `2` for critical findings or invalid CLI input.
 
-Full reports include `schema_version`, `tool_version`, UTC start time, duration, overall severity, structured findings, and raw per-check evidence. Each probe also records its duration; DNS and TCP probes include response times. LAN output includes `default_interface`, scoped `network`, `arp_source`, `arp_status`, and optional `arp_detail`. mDNS output reports normalized, deduplicated `services` plus `raw_count` and `unique_count`. Optional probe failures are contained and represented as findings rather than aborting the report.
+## JSON report contract
 
-The `1.x` schema will remain backward compatible. New fields may be added; consumers should ignore fields they do not recognize.
+Full JSON reports use schema `1.1` and include the tool version, an opaque report ID, UTC start time, duration, execution and outcome status, coverage, findings, checks, evidence, access prerequisites, and remediation state. Probe-specific data remains available under `data`. Optional probe failures are represented as structured outcomes rather than aborting the entire report.
+
+The bundled [`report-1.1.schema.json`](netdiag/schemas/report-1.1.schema.json) defines the external contract. The `1.x` line is additive: existing field meanings are preserved, new fields may be added, and consumers should ignore fields they do not recognize.
+
+Raw JSON can contain device and network identifiers. Prefer `netdiag run --json --redact` for support sharing.
 
 ## Safety and privacy
 
-Normal checks are read-only. `lan --ping` and `ports` generate active traffic, so use them only on networks and hosts you are authorized to test. LAN sweeps are refused when the detected subnet exceeds the configured host safety limit.
+Diagnostics do not change system or network configuration, but several checks still generate ordinary network traffic. DNS and internet-path checks contact their displayed targets; mDNS browses the local network; `ports` attempts TCP connections to the explicit host; and `lan --ping` actively probes the detected subnet. Use active checks only within an authorized scope.
 
-An unredacted report may contain a computer name, SSID, BSSID, mDNS instance names, LAN IP addresses, and neighbor MAC addresses. Use `run --redact` before sharing outside a trusted support channel. Local IP addresses and gateway addresses remain because they are usually essential to troubleshooting.
+No report is uploaded by `netdiag`. The current CLI does not accept passwords, tokens, recovery keys, or router credentials. It does not install persistence, elevate privileges, execute arbitrary scripts, or open a LAN listener.
 
-No report is uploaded by `netdiag`. Internet-path, DNS, and port probes necessarily send ordinary network traffic to the displayed targets.
+## Platform support
 
-## Platform behavior
+The diagnostic CLI currently supports macOS and Linux and uses native operating-system tools when available. Missing tools or restricted operating-system access are reported as unsupported or inconclusive instead of being presented as successful checks.
 
-`netdiag` uses native tools when available:
+- **macOS:** route and interface tools, System Configuration data, available Wi-Fi tools, PF_ROUTE neighbor data, Bonjour, ping, and `dig`.
+- **Linux:** `ip`, `resolvectl`, NetworkManager/`nmcli`, available Wi-Fi tools, Avahi, ping, and `dig`.
 
-- macOS: `route`, `ifconfig`, `scutil`, `networksetup`, `wdutil`/`airport`, PF_ROUTE sysctl for ARP (re-execs via `/usr/bin/python3` when needed), `dns-sd`, `ping`, and `dig`.
-- Linux: `ip`, `resolvectl`, NetworkManager's `nmcli`, `iwgetid`, `avahi-browse`, `ping`, and `dig`.
+Specific-resolver DNS comparison requires `dig`. Without it, system DNS can still use Python's resolver, and Lantern reports when it cannot query a chosen resolver rather than silently substituting another server.
 
-Specific-resolver DNS comparison requires `dig`. Without it, system DNS still works through Python's resolver, and `netdiag` explicitly reports that it cannot query a chosen resolver—it never silently substitutes another server.
+Support depends on the host operating-system version, permissions, and installed native tools. Windows is a future platform, not a supported target in this development build.
 
-## Development
+## Develop and test
 
 ```bash
 python -m pip install -e '.[dev]'
 pytest -q
+ruff check .
+ruff format --check .
 ```
 
-The check modules return `(findings, data)` and do not print directly. This boundary keeps the human UI, JSON API, and future remote collection layer independent from platform probes.
+Checks return structured findings and evidence instead of printing directly. This keeps collection separate from terminal presentation, JSON serialization, the future local UI, and any later consent-based support transport.
 
-See [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged path from local utility to a consent-based, multi-tenant product.
+Architecture and safety decisions are documented under [`docs/architecture`](docs/architecture). See [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged path from a dependable local utility to a consent-based product.

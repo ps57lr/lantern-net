@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netdiag"
-version = "0.2.1"
+version = "0.3.0.dev0"
 description = "Safe, layered network diagnostics for macOS and Linux"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,9 @@ dev = ["pytest>=8.0", "ruff>=0.9"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["netdiag*"]
+
+[tool.setuptools.package-data]
+netdiag = ["schemas/*.json", "ui/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

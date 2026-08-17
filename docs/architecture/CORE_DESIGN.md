@@ -204,6 +204,7 @@ class CheckContext:
     policy: ScanPolicy
     evidence: EvidenceStore
 
+
 @dataclass
 class CheckResult:
     check_id: str
@@ -214,8 +215,10 @@ class CheckResult:
     duration_ms: int
     error: ErrorDetail | None = None
 
+
 class Collector(Protocol):
     def __call__(self, context: CheckContext) -> CheckResult: ...
+
 
 class FindingRule(Protocol):
     def __call__(self, evidence: EvidenceStore) -> list[Finding]: ...
