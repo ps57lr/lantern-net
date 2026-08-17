@@ -9,6 +9,7 @@
     "/api/session/exchange": Object.freeze(["POST"]),
     "/api/session": Object.freeze(["GET"]),
     "/api/status": Object.freeze(["GET"]),
+    "/api/status/events": Object.freeze(["GET"]),
     "/api/diagnostics/start": Object.freeze(["POST"]),
     "/api/diagnostics/cancel": Object.freeze(["POST"]),
     "/api/session/revoke": Object.freeze(["POST"]),
@@ -36,6 +37,7 @@
     Object.freeze({ id: "services", label: "Local services", icon: "mdns", module: "mdns" }),
   ]);
   const STATES = new Set(["ready", "running", "completed", "cancelled", "failed"]);
+  const EXPORT_STATES = new Set(["completed", "cancelled", "failed"]);
   const GOALS = new Set(["problem", "network", "rescue"]);
   const PROFILES = new Set(["passive", "low_impact_network"]);
   const SUMMARY_TONES = new Set(["neutral", "positive", "attention", "critical"]);
@@ -174,10 +176,10 @@
     lan: Object.freeze({ eyebrow: "Network module", title: "LAN", description: "Locally observed neighbor state; basic checks never sweep the LAN." }),
     mdns: Object.freeze({ eyebrow: "Network module", title: "mDNS", description: "A brief local service browse only when explicitly included." }),
     ports: Object.freeze({ eyebrow: "Network module", title: "Ports", description: "Bounded service-port checks against the detected gateway only." }),
-    fixes: Object.freeze({ eyebrow: "Act safely", title: "Fixes", description: "Remediation is deliberately unavailable in this live slice." }),
+    fixes: Object.freeze({ eyebrow: "Act safely", title: "Fixes", description: "Read-only next steps from completed checks. Lantern cannot apply changes from this page." }),
     rescue: Object.freeze({ eyebrow: "Guidance only", title: "Rescue guidance", description: "Network viability context without boot or recovery claims." }),
     session: Object.freeze({ eyebrow: "Local only", title: "LAN session", description: "Remote LAN access is not enabled and no LAN listener is running." }),
-    share: Object.freeze({ eyebrow: "Unavailable", title: "Share", description: "Report export and upload are disabled in this live slice." }),
+    share: Object.freeze({ eyebrow: "Local file", title: "Share", description: "Download a redacted JSON report to this computer. Nothing is uploaded." }),
   });
 
   let csrfToken = null;
@@ -186,12 +188,15 @@
   let statusSnapshot = null;
   let currentView = "overview";
   let pollTimer = null;
+  let statusEventSource = null;
+  let statusStreamGeneration = null;
   let sessionExpiryTimer = null;
   let sessionExpiresAt = 0;
   let pollInFlight = false;
   let startInFlight = false;
   let cancelInFlight = false;
   let revokeInFlight = false;
+  let exportInFlight = false;
   let sessionCleared = false;
   let draftGoal = "problem";
   let draftBasic = false;
@@ -454,12 +459,15 @@
     }
     const expectedOrder = GOAL_MODULE_ORDER[goal];
     return Object.freeze(value.map((module, index) => {
-      if (!exactKeys(module, ["id", "label", "status", "detail", "finding", "technical"], [])) {
+      if (!exactKeys(module, ["id", "label", "status", "detail", "finding", "why_it_matters", "technical"], [])) {
         throw new Error("Lantern returned an invalid module result.");
       }
       if (
         module.id !== expectedOrder[index] ||
         !MODULE_STATUSES.has(module.status) ||
+        typeof module.why_it_matters !== "string" ||
+        module.why_it_matters.length < 1 ||
+        module.why_it_matters.length > 240 ||
         !Array.isArray(module.technical) ||
         module.technical.length > 4
       ) {
@@ -471,12 +479,13 @@
         status: module.status,
         detail: requiredSafeText(module.detail, 500, "module detail"),
         finding: requiredSafeText(module.finding, 180, "module finding"),
+        why_it_matters: requiredSafeText(module.why_it_matters, 240, "module context"),
         technical: Object.freeze(module.technical.map((item) => requiredSafeText(item, 180, "technical context"))),
       });
     }));
   }
 
-  function validateCapabilities(value) {
+  function validateCapabilities(value, state) {
     const names = [
       "passive_scan",
       "low_impact_network",
@@ -500,10 +509,16 @@
     if (result.passive_scan !== true || result.low_impact_network !== true) {
       throw new Error("Lantern returned an incompatible capability description.");
     }
-    for (const name of ["active_discovery", "remediation", "credentials", "lan_remote", "rescue_boot", "share_export"]) {
+    for (const name of ["active_discovery", "remediation", "credentials", "lan_remote", "rescue_boot"]) {
       if (result[name] !== false) {
         throw new Error("Lantern refused an unsafe capability description.");
       }
+    }
+    if (result.share_export !== false && !EXPORT_STATES.has(state)) {
+      throw new Error("Lantern refused an unsafe capability description.");
+    }
+    if (result.share_export !== true && EXPORT_STATES.has(state)) {
+      throw new Error("Lantern returned an inconsistent export capability.");
     }
     return Object.freeze(result);
   }
@@ -570,7 +585,7 @@
       run: run,
       progress: validateProgress(value.progress),
       modules: modules,
-      capabilities: validateCapabilities(value.capabilities),
+      capabilities: validateCapabilities(value.capabilities, value.state),
     });
   }
 
@@ -699,10 +714,12 @@
     startInFlight = false;
     cancelInFlight = false;
     revokeInFlight = false;
+    exportInFlight = false;
     pollInFlight = false;
     authenticated = false;
     csrfToken = null;
     sessionCleared = true;
+    stopStatusStream();
     stopPolling();
     newCheckButton.disabled = true;
     setSessionActionsDisabled(true);
@@ -711,6 +728,7 @@
     runAnnouncement.textContent = "";
     showNotice(message, tone === "info" ? "info" : "attention");
     statusSnapshot = null;
+    syncCapabilityNavigation();
     if (closeOpenDrawer) {
       closeSidebar(true);
     }
@@ -828,6 +846,99 @@
     }
   }
 
+  function stopStatusStream() {
+    statusStreamGeneration = null;
+    if (statusEventSource !== null) {
+      statusEventSource.close();
+      statusEventSource = null;
+    }
+  }
+
+  function syncCapabilityNavigation() {
+    const shareEnabled = Boolean(statusSnapshot && statusSnapshot.capabilities.share_export);
+    for (const item of document.querySelectorAll("[data-view-target=\"share\"]")) {
+      item.disabled = !shareEnabled;
+      const note = item.querySelector(".nav-note");
+      if (note) {
+        note.textContent = shareEnabled ? "Local file" : "After check";
+      }
+    }
+  }
+
+  function applyStatusSnapshot(nextSnapshot, generation) {
+    if (!isCurrentSession(generation)) {
+      return false;
+    }
+    const previousState = statusSnapshot ? statusSnapshot.state : null;
+    const changed = JSON.stringify(nextSnapshot) !== JSON.stringify(statusSnapshot);
+    statusSnapshot = nextSnapshot;
+    connectionState.textContent = statusSnapshot.state === "running" ? "Checking locally" : "Private local session";
+    hideNotice();
+    announceState(statusSnapshot.state, previousState);
+    syncCapabilityNavigation();
+    if (changed) {
+      renderCurrentView();
+    }
+    if (statusSnapshot.state === "running") {
+      openStatusStream(generation);
+    } else {
+      stopStatusStream();
+      stopPolling();
+    }
+    return true;
+  }
+
+  function openStatusStream(generation) {
+    if (!isCurrentSession(generation) || statusStreamGeneration === generation) {
+      return;
+    }
+    stopStatusStream();
+    stopPolling();
+    statusStreamGeneration = generation;
+    const streamUrl = new URL("/api/status/events", window.location.origin);
+    if (streamUrl.origin !== window.location.origin || streamUrl.pathname !== "/api/status/events") {
+      schedulePoll(POLL_RUNNING_MS, false, generation);
+      return;
+    }
+    const source = new EventSource(streamUrl.toString());
+    statusEventSource = source;
+
+    source.addEventListener("status", function (event) {
+      if (!isCurrentSession(generation) || statusStreamGeneration !== generation) {
+        return;
+      }
+      try {
+        const payload = JSON.parse(String(event.data));
+        applyStatusSnapshot(validateStatus(payload), generation);
+      } catch (_error) {
+        showNotice("Lantern received an invalid status stream update. It will fall back to periodic status checks.", "attention");
+        stopStatusStream();
+        schedulePoll(POLL_RUNNING_MS, false, generation);
+      }
+    });
+
+    source.addEventListener("close", function () {
+      if (!isCurrentSession(generation) || statusStreamGeneration !== generation) {
+        return;
+      }
+      const stillRunning = Boolean(statusSnapshot && statusSnapshot.state === "running");
+      stopStatusStream();
+      if (stillRunning) {
+        schedulePoll(POLL_RUNNING_MS, false, generation);
+      }
+    });
+
+    source.addEventListener("error", function () {
+      if (!isCurrentSession(generation) || statusStreamGeneration !== generation) {
+        return;
+      }
+      stopStatusStream();
+      if (statusSnapshot && statusSnapshot.state === "running") {
+        schedulePoll(POLL_RUNNING_MS, false, generation);
+      }
+    });
+  }
+
   function schedulePoll(delay, continueOnError, generation) {
     stopPolling();
     if (isCurrentSession(generation)) {
@@ -870,19 +981,9 @@
       if (!isCurrentSession(generation)) {
         return;
       }
-      const previousState = statusSnapshot ? statusSnapshot.state : null;
-      const changed = JSON.stringify(nextSnapshot) !== JSON.stringify(statusSnapshot);
-      statusSnapshot = nextSnapshot;
-      connectionState.textContent = statusSnapshot.state === "running" ? "Checking locally" : "Private local session";
-      hideNotice();
-      announceState(statusSnapshot.state, previousState);
-      if (changed) {
-        renderCurrentView();
-      }
-      if (statusSnapshot.state === "running") {
+      applyStatusSnapshot(nextSnapshot, generation);
+      if (statusSnapshot && statusSnapshot.state === "running" && statusEventSource === null) {
         schedulePoll(POLL_RUNNING_MS, false, generation);
-      } else {
-        stopPolling();
       }
     } catch (_error) {
       if (!isCurrentSession(generation)) {
@@ -1225,7 +1326,9 @@
       ["remediation", "Apply fixes", "No remediation API or fix handler is connected."],
       ["credentials", "Collect credentials", "There are no credential fields or credential transport."],
       ["lan_remote", "Open remote access", "No LAN listener or remote session is enabled."],
-      ["share_export", "Export or share", "No report export or external sharing route is connected."],
+      ["share_export", "Export or share", statusSnapshot && statusSnapshot.capabilities.share_export
+        ? "Download a redacted JSON report to this computer only."
+        : "Report export becomes available after a finished check."],
     ];
     for (const item of items) {
       const available = Boolean(statusSnapshot && statusSnapshot.capabilities[item[0]]);
@@ -1303,6 +1406,8 @@
     heading.append(mark, createElement("h2", "", module.label), statusBadge(module.status));
     panel.append(heading);
     const finding = createElement("div", "module-finding");
+    finding.append(createElement("p", "eyebrow", "Why this matters"));
+    finding.append(createElement("p", "module-why", module.why_it_matters));
     finding.append(createElement("p", "eyebrow", "Safe finding summary"));
     finding.append(createElement("h3", "", module.finding));
     finding.append(createElement("p", "module-focus-detail", module.detail));
@@ -1336,6 +1441,39 @@
       }
       disclosureBody.append(list);
     }
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "secondary-button module-copy-button";
+    copyButton.textContent = "Copy redacted module JSON";
+    copyButton.onclick = function () {
+      const payload = JSON.stringify({
+        id: module.id,
+        label: module.label,
+        status: module.status,
+        finding: module.finding,
+        why_it_matters: module.why_it_matters,
+        technical: module.technical,
+      });
+      const helper = document.createElement("textarea");
+      helper.value = payload;
+      helper.setAttribute("readonly", "readonly");
+      helper.style.position = "fixed";
+      helper.style.left = "-9999px";
+      document.body.append(helper);
+      helper.select();
+      let copied = false;
+      try {
+        copied = document.execCommand("copy");
+      } catch (_error) {
+        copied = false;
+      }
+      helper.remove();
+      showNotice(
+        copied ? "Redacted module JSON was copied on this computer." : "Lantern could not copy the module JSON automatically.",
+        copied ? "info" : "attention",
+      );
+    };
+    disclosureBody.append(copyButton);
     disclosure.append(disclosureBody);
     panel.append(disclosure);
     const truth = createElement("div", "truth-row");
@@ -1368,12 +1506,43 @@
   }
 
   function renderFixes() {
-    return unavailablePanel(
-      "wrench",
-      "Fixes are unavailable",
-      "This interface can diagnose and explain, but it cannot preview, approve, apply, or roll back a change.",
-      ["No remediation handlers are connected.", "No administrator credentials can be entered.", "A diagnostic result never applies a change automatically."],
-    );
+    if (!statusSnapshot) {
+      return emptyPanel("No authenticated status is available.");
+    }
+    const fragment = document.createDocumentFragment();
+    const banner = createElement("section", "panel explanation-panel");
+    banner.append(createIcon("wrench"), createElement("h2", "", "Read-only next steps"));
+    banner.append(createElement("p", "", "Lantern can diagnose and explain, but it cannot preview, approve, apply, or roll back a change. No remediation handlers are connected."));
+    fragment.append(banner);
+
+    if (statusSnapshot.issues.length === 0) {
+      const empty = createElement("section", "panel unavailable-panel");
+      empty.append(createIcon("info"), createElement("h2", "", "No priority recommendation yet"));
+      empty.append(createElement("p", "", "Start and finish a check to receive up to three safe next steps from the completed result."));
+      fragment.append(empty);
+    } else {
+      const list = createElement("section", "panel recommendation-list");
+      list.append(createElement("h2", "", "Suggested next steps"));
+      for (const issue of statusSnapshot.issues) {
+        const card = createElement("article", "issue-card recommendation-card");
+        card.append(createElement("p", "eyebrow", issue.module), createElement("h3", "", issue.title));
+        card.append(createElement("p", "", issue.explanation));
+        const step = createElement("div", "module-next-step");
+        step.append(createIcon("arrow-right"));
+        const stepCopy = createElement("div", "");
+        stepCopy.append(createElement("h4", "", "Safe next step"), createElement("p", "", issue.next_step));
+        step.append(stepCopy);
+        card.append(step);
+        list.append(card);
+      }
+      fragment.append(list);
+    }
+
+    const boundary = createElement("section", "panel safety-panel");
+    boundary.append(createIcon("shield"), createElement("h2", "", "Fixes are unavailable"));
+    boundary.append(createElement("p", "", "This interface does not apply changes automatically and cannot enter administrator credentials."));
+    fragment.append(boundary);
+    return fragment;
   }
 
   function renderRescue() {
@@ -1403,13 +1572,85 @@
     );
   }
 
+  function downloadReport(trigger) {
+    if (exportInFlight) {
+      return;
+    }
+    if (!statusSnapshot || !statusSnapshot.capabilities.share_export) {
+      showNotice("Report export is available only after a finished check.", "attention");
+      return;
+    }
+    exportInFlight = true;
+    trigger.disabled = true;
+    trigger.textContent = "Preparing local file…";
+    try {
+      const exported = validateStatus(JSON.parse(JSON.stringify(statusSnapshot)));
+      const payload = JSON.stringify(exported, null, 2) + "\n";
+      const blob = new Blob([payload], { type: "application/json" });
+      if (blob.size > MAX_JSON_BYTES) {
+        showNotice("The redacted report exceeded the local size limit.", "attention");
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "lantern-report-" + exported.state + ".json";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showNotice("Redacted report downloaded to this computer. Nothing was uploaded.", "info");
+    } catch (_error) {
+      showNotice("Lantern could not create the local report.", "attention");
+    } finally {
+      exportInFlight = false;
+      trigger.disabled = false;
+      trigger.textContent = "Download reviewed JSON";
+    }
+  }
+
   function renderShare() {
-    return unavailablePanel(
-      "share",
-      "Sharing is disabled",
-      "This live interface has no download, upload, email, clipboard, or external sharing action.",
-      ["Status remains on this computer.", "No external destination is configured.", "The disabled navigation item is an explicit product boundary."],
-    );
+    if (!statusSnapshot) {
+      return emptyPanel("No authenticated status is available.");
+    }
+    const fragment = document.createDocumentFragment();
+    const panel = createElement("section", "panel explanation-panel");
+    panel.append(createIcon("share"), createElement("h2", "", "Download a redacted report"));
+    if (statusSnapshot.capabilities.share_export) {
+      panel.append(createElement("p", "", "Review the same identifier-free presentation Lantern shows in the browser before creating a local file. Lantern does not upload or transmit it; your browser, operating system, backup, or sync settings control what happens to downloaded files."));
+      const included = createElement("section", "report-boundary");
+      included.append(createElement("h3", "", "Included"));
+      included.append(createElement("p", "", "The selected goal and profile, run timing, diagnostic condition, confidence, coverage, safe findings and next steps, path and module summaries, and capability states."));
+      const excluded = createElement("section", "report-boundary");
+      excluded.append(createElement("h3", "", "Excluded"));
+      excluded.append(createElement("p", "", "Raw evidence, hostnames, Wi-Fi names, device identifiers, IP or MAC addresses, credentials, recovery keys, and native error text."));
+      panel.append(included, excluded);
+      panel.append(createElement("p", "report-warning", "This report may still reveal the selected goal, diagnostic condition, findings, and timing. Review it before sending it to anyone."));
+      const preview = document.createElement("details");
+      preview.className = "technical-disclosure report-preview";
+      const previewSummary = document.createElement("summary");
+      previewSummary.textContent = "Review redacted JSON";
+      const previewBody = createElement("pre", "report-preview-json", JSON.stringify(statusSnapshot, null, 2));
+      previewBody.tabIndex = 0;
+      previewBody.setAttribute("aria-label", "Share-safe report JSON preview");
+      preview.append(previewSummary, previewBody);
+      panel.append(preview);
+      const button = createElement("button", "primary-button", "Download reviewed JSON");
+      button.type = "button";
+      button.addEventListener("click", function () {
+        downloadReport(button);
+      });
+      panel.append(button);
+    } else {
+      panel.append(createElement("p", "", "Sharing is disabled until a diagnostic check reaches a finished state."));
+    }
+    fragment.append(panel);
+
+    const boundary = createElement("section", "panel safety-panel");
+    boundary.append(createIcon("shield"), createElement("h2", "", "Local-only boundary"));
+    boundary.append(createElement("p", "", "Lantern has no external destination and does not upload this report. Download storage, backup, and synchronization are controlled outside Lantern."));
+    fragment.append(boundary);
+    return fragment;
   }
 
   function renderProgress() {

@@ -1,0 +1,18 @@
+# Generated and reviewed for the PyInstaller 6.22.1 family-beta build toolchain.
+# Install with: pip install --only-binary=:all: --require-hashes -r <this file>
+# Supported build hosts: macOS arm64/x86_64 and glibc Linux arm64/x86_64.
+
+PyInstaller==6.22.1 \
+    --hash=sha256:d519a5549bf560407a9cffa8547f278e79c1093dc1cade6d9658c67b650d66c4 \
+    --hash=sha256:0f257d6329d90def6b96f3ad9b601f4e10e549017d2ad09e730f4a9741b42138 \
+    --hash=sha256:10d009ac9ddf17b57dbfe22a453363a02be4cb0d5bd8a119ba59ef530b936296
+altgraph==0.17.5 \
+    --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
+macholib==1.16.4; sys_platform == "darwin" \
+    --hash=sha256:da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pyinstaller-hooks-contrib==2026.6 \
+    --hash=sha256:fd13b8ac126b35361175edacd41a0d97080b75dd5f4b594ecefefff969509dd3
+setuptools==84.0.0 \
+    --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670

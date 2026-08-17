@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import socket
 import threading
@@ -18,7 +19,7 @@ from netdiag.ui import server as server_module
 from netdiag.ui.controller import JsonValue
 from netdiag.ui.security import LocalSessionSecurity
 from netdiag.ui.server import LanternLocalServer
-from netdiag.ui.viewmodel import ready_ui_viewmodel
+from netdiag.ui.viewmodel import build_ui_viewmodel, ready_ui_viewmodel
 
 
 @dataclass(slots=True)
@@ -938,3 +939,420 @@ def test_lifetime_guard_normalizes_cleanup_failure_without_stranding_server(
     assert server.lifecycle_failed
     assert not server.is_running
     server.close()
+
+
+class CompletedStatusProvider:
+    def snapshot(self) -> dict[str, JsonValue]:
+        checks = [
+            {
+                "module": "routing",
+                "execution_status": "completed",
+                "outcome_status": "informational",
+            },
+            {"module": "routing", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "dns", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {"module": "wifi", "execution_status": "completed", "outcome_status": "informational"},
+            {"module": "lan", "execution_status": "completed", "outcome_status": "informational"},
+            {"module": "mdns", "execution_status": "not_run", "outcome_status": "not_tested"},
+            {
+                "module": "gateway_ports",
+                "execution_status": "not_run",
+                "outcome_status": "not_tested",
+            },
+            {"module": "lan", "execution_status": "not_run", "outcome_status": "not_tested"},
+        ]
+        findings = [
+            {
+                "code": "NDG.ROUTE.DEFAULT_ROUTE_OBSERVED",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "high"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+            {
+                "code": "NDG.WIFI.CONNECTED",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "medium"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+            {
+                "code": "NDG.LAN.NEIGHBOR_CACHE_READ",
+                "severity": "info",
+                "status": "informational",
+                "confidence": {"level": "medium"},
+                "title": "withheld",
+                "detail": "withheld",
+                "hint": "",
+            },
+        ]
+        return build_ui_viewmodel(
+            {
+                "state": "completed",
+                "duration_ms": 12,
+                "run": {
+                    "goal": "problem",
+                    "profile": "passive",
+                    "include_mdns": False,
+                    "cancel_requested": False,
+                },
+                "progress": {
+                    "processed": 8,
+                    "planned": 8,
+                    "percent": 100,
+                    "events": [],
+                },
+                "result": {
+                    "schema_version": "1.1",
+                    "status": "partial",
+                    "outcome": "inconclusive",
+                    "severity": "ok",
+                    "coverage": {
+                        "status": "partial",
+                        "planned": 8,
+                        "completed": 3,
+                        "partial": 0,
+                        "failed": 0,
+                        "cancelled": 0,
+                        "not_run": 5,
+                    },
+                    "checks": checks,
+                    "findings": findings,
+                    "redacted": True,
+                    "truncated": False,
+                },
+            }
+        )
+
+
+def test_report_export_is_client_local_and_has_no_http_route(
+    local_server: LanternLocalServer,
+) -> None:
+    _result, cookie, _csrf = exchange(local_server)
+    absent = request(
+        local_server,
+        "GET",
+        "/api/report/export",
+        headers={"Cookie": cookie, "Origin": local_server.origin},
+    )
+    assert absent.status == 404
+    assert error_code(absent) == "route_not_found"
+    assert b"password" not in absent.body
+
+
+def test_status_event_stream_emits_terminal_close_event() -> None:
+    with LanternLocalServer(status_provider=CompletedStatusProvider()) as server:
+        _result, cookie, _csrf = exchange(server)
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+        try:
+            connection.putrequest(
+                "GET",
+                "/api/status/events",
+                skip_host=True,
+            )
+            connection.putheader("Host", urlsplit(server.origin).netloc)
+            connection.putheader("Cookie", cookie)
+            connection.putheader("Origin", server.origin)
+            connection.endheaders()
+            response = connection.getresponse()
+            assert response.status == 200
+            assert response.getheader("Content-Type", "").startswith("text/event-stream")
+            body = response.read().decode("utf-8")
+        finally:
+            connection.close()
+        assert "event: status" in body
+        assert "event: close" in body
+        assert '"state":"completed"' in body.replace(" ", "")
+
+
+def test_status_poll_rechecks_session_after_blocked_provider_before_emitting() -> None:
+    class BlockingProvider:
+        def __init__(self) -> None:
+            self.entered = threading.Event()
+            self.release = threading.Event()
+
+        def snapshot(self) -> dict[str, JsonValue]:
+            self.entered.set()
+            assert self.release.wait(timeout=2)
+            return {"state": "running", "detail": "family-mac.local"}
+
+    provider = BlockingProvider()
+    with LanternLocalServer(status_provider=provider) as server:
+        _result, cookie, csrf = exchange(server)
+        status_result: list[HttpResult] = []
+        status_thread = threading.Thread(
+            target=lambda: status_result.append(
+                request(
+                    server,
+                    "GET",
+                    "/api/status",
+                    headers={"Cookie": cookie, "Origin": server.origin},
+                )
+            )
+        )
+        status_thread.start()
+        assert provider.entered.wait(timeout=1)
+        revoked = request(
+            server,
+            "POST",
+            "/api/session/revoke",
+            body="{}",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "Content-Type": "application/json",
+                "X-Lantern-CSRF": csrf,
+            },
+        )
+        assert revoked.status == 200
+        provider.release.set()
+        status_thread.join(timeout=2)
+        assert not status_thread.is_alive()
+        assert len(status_result) == 1
+        denied = status_result[0]
+        assert denied.status == 401
+        assert "max-age=0" in denied.headers["set-cookie"].lower()
+        assert b"family-mac" not in denied.body
+
+
+def test_status_poll_rechecks_expiry_after_provider_before_emitting() -> None:
+    clock = FakeClock()
+    security = LocalSessionSecurity(clock=clock, session_ttl=1)
+    token = security.issue_launch_token()
+    session = security.exchange(token, client_key="local-test")
+    assert session is not None
+
+    class ExpiringProvider:
+        def snapshot(self) -> dict[str, JsonValue]:
+            clock.advance(2)
+            return {"state": "running", "detail": "family-mac.local"}
+
+    application = server_module.LocalApplication(
+        expected_host="lantern-fixture.localhost:1234",
+        expected_origin="http://lantern-fixture.localhost:1234",
+        security=security,
+        status_provider=ExpiringProvider(),
+    )
+    response = application._status_response(session.session_id)
+    assert response.status == 401
+    assert any(
+        name.lower() == "set-cookie" and "max-age=0" in value.lower()
+        for name, value in response.headers
+    )
+    assert b"family-mac" not in response.body
+
+
+class MutableRunningStatusProvider:
+    def __init__(self) -> None:
+        self.terminal = threading.Event()
+
+    def snapshot(self) -> dict[str, JsonValue]:
+        return {"state": "completed" if self.terminal.is_set() else "running"}
+
+
+def _open_status_stream(
+    server: LanternLocalServer,
+    cookie: str,
+) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+    connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+    connection.putrequest("GET", "/api/status/events", skip_host=True)
+    connection.putheader("Host", urlsplit(server.origin).netloc)
+    connection.putheader("Cookie", cookie)
+    connection.putheader("Origin", server.origin)
+    connection.endheaders()
+    return connection, connection.getresponse()
+
+
+def test_status_stream_has_one_session_lease_and_releases_after_terminal() -> None:
+    provider = MutableRunningStatusProvider()
+    with LanternLocalServer(status_provider=provider) as server:
+        _result, cookie, _csrf = exchange(server)
+        connection, first = _open_status_stream(server, cookie)
+        try:
+            assert first.status == 200
+            busy = request(
+                server,
+                "GET",
+                "/api/status/events",
+                headers={"Cookie": cookie, "Origin": server.origin},
+            )
+            assert busy.status == 429
+            assert busy.headers["retry-after"] == "1"
+            assert error_code(busy) == "status_stream_busy"
+
+            provider.terminal.set()
+            body = first.read().decode()
+            assert "event: close" in body
+            assert '"state":"completed"' in body
+        finally:
+            connection.close()
+
+        deadline = time.monotonic() + 2
+        while True:
+            after = request(
+                server,
+                "GET",
+                "/api/status/events",
+                headers={"Cookie": cookie, "Origin": server.origin},
+            )
+            if after.status != 429 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+        assert after.status == 200
+        assert "event: close" in after.body.decode()
+
+
+def test_status_stream_global_and_per_session_leases_are_bounded() -> None:
+    application = server_module.LocalApplication(
+        expected_host="lantern-fixture.localhost:1234",
+        expected_origin="http://lantern-fixture.localhost:1234",
+        security=LocalSessionSecurity(),
+        status_provider=FixtureStatusProvider(),
+    )
+    releases = []
+    for marker in ("a", "b", "c", "d"):
+        release = application._acquire_status_stream(marker * 43)
+        assert release is not None
+        releases.append(release)
+    assert application._acquire_status_stream("a" * 43) is None
+    assert application._acquire_status_stream("e" * 43) is None
+
+    releases[0]()
+    replacement = application._acquire_status_stream("e" * 43)
+    assert replacement is not None
+    replacement()
+    for release in releases:
+        release()
+        release()
+    assert application._status_stream_total == 0
+
+
+def test_status_stream_rechecks_session_after_provider_before_emitting_status() -> None:
+    security = LocalSessionSecurity()
+    token = security.issue_launch_token()
+    session = security.exchange(token, client_key="fixture")
+    assert session is not None
+
+    class RevokingProvider:
+        def snapshot(self) -> dict[str, JsonValue]:
+            security.revoke(session.session_id)
+            return {"state": "running", "detail": "password=hunter2"}
+
+    application = server_module.LocalApplication(
+        expected_host="lantern-fixture.localhost:1234",
+        expected_origin="http://lantern-fixture.localhost:1234",
+        security=security,
+        status_provider=RevokingProvider(),
+    )
+    output = io.BytesIO()
+    server_module._write_status_event_stream(output, application, session.session_id)
+    emitted = output.getvalue()
+    assert b"event: status" not in emitted
+    assert b"hunter2" not in emitted
+    assert b'"reason":"session_ended"' in emitted
+
+
+def test_status_stream_expiry_during_provider_call_emits_no_status() -> None:
+    clock = FakeClock()
+    security = LocalSessionSecurity(clock=clock, session_ttl=1)
+    token = security.issue_launch_token()
+    session = security.exchange(token, client_key="fixture")
+    assert session is not None
+
+    class ExpiringProvider:
+        def snapshot(self) -> dict[str, JsonValue]:
+            clock.advance(2)
+            return {"state": "running", "detail": "family-mac.local"}
+
+    application = server_module.LocalApplication(
+        expected_host="lantern-fixture.localhost:1234",
+        expected_origin="http://lantern-fixture.localhost:1234",
+        security=security,
+        status_provider=ExpiringProvider(),
+    )
+    output = io.BytesIO()
+    server_module._write_status_event_stream(output, application, session.session_id)
+    emitted = output.getvalue()
+    assert b"event: status" not in emitted
+    assert b"family-mac" not in emitted
+    assert b'"reason":"session_ended"' in emitted
+
+
+def test_status_stream_lease_releases_on_provider_error_and_writer_disconnect() -> None:
+    class FailingProvider:
+        def snapshot(self) -> dict[str, JsonValue]:
+            raise RuntimeError("password=hunter2")
+
+    with LanternLocalServer(status_provider=FailingProvider()) as server:
+        _result, cookie, _csrf = exchange(server)
+        failed = request(
+            server,
+            "GET",
+            "/api/status/events",
+            headers={"Cookie": cookie, "Origin": server.origin},
+        )
+        assert failed.status == 200
+        assert b"status_unavailable" in failed.body
+        assert b"hunter2" not in failed.body
+        assert server._server is not None
+        assert server._server.application is not None
+        assert server._server.application._status_stream_total == 0
+
+    application = server_module.LocalApplication(
+        expected_host="lantern-fixture.localhost:1234",
+        expected_origin="http://lantern-fixture.localhost:1234",
+        security=server_module.LocalSessionSecurity(),
+        status_provider=MutableRunningStatusProvider(),
+    )
+    release = application._acquire_status_stream("x" * 43)
+    assert release is not None
+    assert application._status_stream_total == 1
+
+    class FailingStreamHandler:
+        close_connection = False
+
+        class Connection:
+            def settimeout(self, _timeout: float) -> None:
+                return
+
+        class Writer:
+            def write(self, _body: bytes) -> None:
+                raise BrokenPipeError
+
+            def flush(self) -> None:
+                return
+
+        class Server:
+            pass
+
+        connection = Connection()
+        wfile = Writer()
+        local_server = Server()
+        local_server.application = application
+
+        def send_response_only(self, _status: int) -> None:
+            return
+
+        def send_header(self, _name: str, _value: str) -> None:
+            return
+
+        def end_headers(self) -> None:
+            return
+
+    response = server_module._StreamResponse(
+        status=200,
+        content_type="text/event-stream",
+        headers=(),
+        timeout_seconds=1,
+        session_id="x" * 43,
+        writer=lambda stream, _application, _session: stream.write(b"status"),
+        after_stream=release,
+    )
+    handler = FailingStreamHandler()
+    server_module._LocalRequestHandler.write_stream(handler, response, head_only=False)
+    assert application._status_stream_total == 0
+    assert handler.close_connection is True

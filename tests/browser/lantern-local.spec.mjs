@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -553,7 +554,7 @@ for (const scenario of DESKTOP_SCENARIOS) {
         credentials: false,
         lan_remote: false,
         rescue_boot: false,
-        share_export: false,
+        share_export: true,
       });
       if (scenario.id === "cancel") {
         expect(status.run.cancel_requested).toBe(true);
@@ -568,6 +569,32 @@ for (const scenario of DESKTOP_SCENARIOS) {
       expect(visibleText).not.toMatch(/\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/i);
       await expect(page.locator(".issue-card")).toHaveCount(status.issues.length);
       await expectNoAxeViolations(page);
+
+      if (scenario.id === "attention") {
+        await page.locator('[data-view-target="share"]').first().click();
+        await expect(page.getByRole("heading", { name: "Download a redacted report" }))
+          .toBeVisible();
+        await expect(page.getByText(/may still reveal the selected goal/i)).toBeVisible();
+        await page.getByText("Review redacted JSON", { exact: true }).click();
+        const previewText = await page.locator(".report-preview-json").textContent();
+        const preview = JSON.parse(previewText);
+        expect(preview).toEqual(status);
+        expect(previewText).not.toContain("synthetic source prose withheld");
+        expect(previewText).not.toContain("password=hunter2");
+        expect(previewText).not.toMatch(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+        expect(previewText).not.toMatch(/\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/i);
+
+        const downloadPromise = page.waitForEvent("download");
+        await page.getByRole("button", { name: "Download reviewed JSON" }).click();
+        const download = await downloadPromise;
+        expect(download.suggestedFilename()).toBe("lantern-report-completed.json");
+        const downloadPath = await download.path();
+        expect(downloadPath).not.toBeNull();
+        const downloadedText = await readFile(downloadPath, "utf8");
+        expect(JSON.parse(downloadedText)).toEqual(status);
+        expect(downloadedText).not.toContain("synthetic source prose withheld");
+        await expectNoAxeViolations(page);
+      }
 
       expect(observed.startRequests).toHaveLength(1);
       await expectExactMutation(

@@ -108,3 +108,17 @@ jobs:
           LANTERN_PYTHON: python
           PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/lantern-browser-results
         run: npm run test:browser
+      - name: Build and isolate the exact wheel for browser acceptance
+        run: |
+          python -m pip install --disable-pip-version-check --no-input "setuptools==80.9.0"
+          python -m pip wheel --disable-pip-version-check --no-input --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/lantern-browser-wheels" .
+          wheel_path="$(find "$RUNNER_TEMP/lantern-browser-wheels" -maxdepth 1 -type f -name 'netdiag-*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m venv "$RUNNER_TEMP/lantern-browser-wheel"
+          "$RUNNER_TEMP/lantern-browser-wheel/bin/python" -m pip install --disable-pip-version-check --no-input --no-index --no-deps "$wheel_path"
+      - name: Exercise the installed wheel through the same browser matrix
+        env:
+          LANTERN_INSTALLED_PACKAGE: "1"
+          LANTERN_PYTHON: ${{ runner.temp }}/lantern-browser-wheel/bin/python
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/lantern-wheel-browser-results
+        run: npm run test:browser

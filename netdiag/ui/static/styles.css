@@ -405,6 +405,10 @@ h3 {
   font-weight: 720;
 }
 
+.nav-item.is-current .nav-note {
+  color: var(--ink-soft);
+}
+
 .privacy-note {
   display: flex;
   gap: 10px;
@@ -1366,6 +1370,62 @@ h3 {
   color: var(--ink-soft);
   font-size: .92rem;
   line-height: 1.62;
+}
+
+.module-why {
+  margin: 0.35rem 0 0.85rem;
+}
+
+.module-copy-button {
+  margin-top: 0.85rem;
+}
+
+.report-boundary {
+  max-width: 850px;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+
+.report-boundary h3 {
+  margin-bottom: 6px;
+  font-size: 0.95rem;
+}
+
+.report-warning {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--amber);
+  background: var(--attention-bg);
+  color: var(--ink-soft) !important;
+}
+
+.report-preview {
+  max-width: none;
+}
+
+.report-preview-json {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 16px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: 0.76rem/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.recommendation-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.recommendation-card h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
 }
 
 .module-finding {

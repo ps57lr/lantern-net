@@ -98,6 +98,36 @@ _PROGRESS_MODULE_SEQUENCE: Final[tuple[str, ...]] = (
     "gateway_ports",
     "lan_ping",
 )
+_WHY_IT_MATTERS: Final[dict[str, str]] = {
+    "route": "Routing shows whether this device has a usable path toward a gateway and the wider network.",
+    "wifi": "Wi-Fi link quality can explain local slowdowns even when the wider internet path is healthy.",
+    "dns": "Name lookup problems can block services while routing and raw connectivity still look fine.",
+    "lan": "Nearby-device observations help separate local-link issues from upstream path problems.",
+    "mdns": "Local service discovery helps explain missing devices or services on the same network segment.",
+    "ports": "Gateway service reachability can explain why some applications fail while general browsing works.",
+}
+_CHECK_CATEGORY_LABELS: Final[dict[str, str]] = {
+    "routing": "Routing",
+    "routing_connectivity": "Path reachability",
+    "wifi": "Wi-Fi",
+    "dns": "DNS",
+    "lan": "LAN neighbors",
+    "lan_ping": "LAN reachability",
+    "mdns": "mDNS browse",
+    "gateway_ports": "Gateway services",
+}
+_OUTCOME_LABELS: Final[dict[str, str]] = {
+    "healthy": "reported no problem",
+    "informational": "returned informational context",
+    "degraded": "reported a degraded result",
+    "failed": "could not complete cleanly",
+    "blocked": "reported a blocking condition",
+    "inconclusive": "returned an inconclusive result",
+    "not_tested": "was not tested",
+    "unsupported": "is unsupported on this platform",
+    "permission_denied": "was blocked by permissions",
+    "cancelled": "was cancelled",
+}
 _DETAILS: Final[dict[str, str]] = {
     "not_started": "Not checked yet.",
     "queued": "Waiting for its turn.",
@@ -524,7 +554,7 @@ def build_ui_viewmodel(snapshot: Mapping[str, object]) -> dict[str, JsonValue]:
             "credentials": False,
             "lan_remote": False,
             "rescue_boot": False,
-            "share_export": False,
+            "share_export": state in {"completed", "cancelled", "failed"},
         },
     }
 
@@ -1092,6 +1122,7 @@ def _module_views(
             "status": statuses[module],
             "detail": _DETAILS[statuses[module]],
             "finding": issue_title_by_module.get(module, _MODULE_FINDINGS[statuses[module]]),
+            "why_it_matters": _WHY_IT_MATTERS[module],
             "technical": _technical_view(statuses[module], checks_by_module[module]),
         }
         for module in _GOAL_MODULE_ORDER[goal]
@@ -1174,13 +1205,20 @@ def _apply_finding_statuses(statuses: dict[str, str], findings: tuple[_FindingSi
 def _technical_view(status: str, checks: list[_CheckSignal]) -> list[JsonValue]:
     if not checks:
         return [_DETAILS[status]]
-    lines: list[JsonValue] = []
-    for execution in ("failed", "partial", "cancelled", "not_run", "completed"):
-        if any(check.execution == execution for check in checks):
-            lines.append(_TECHNICAL_BY_EXECUTION[execution])
-        if len(lines) == 4:
+    lines: list[JsonValue] = [_DETAILS[status]]
+    for check in checks:
+        label = _CHECK_CATEGORY_LABELS.get(check.category, "Diagnostic check")
+        outcome = _OUTCOME_LABELS.get(check.outcome, "returned a result")
+        lines.append(f"{label} {check.execution} and {outcome}.")
+        if len(lines) >= 4:
             break
-    return lines
+    if len(lines) == 1:
+        for execution in ("failed", "partial", "cancelled", "not_run", "completed"):
+            if any(item.execution == execution for item in checks):
+                lines.append(_TECHNICAL_BY_EXECUTION[execution])
+            if len(lines) == 4:
+                break
+    return lines[:4]
 
 
 def _issue_views(result: _ResultSignals | None, goal: str) -> list[JsonValue]:

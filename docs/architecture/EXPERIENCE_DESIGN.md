@@ -1,8 +1,8 @@
 # Lantern experience and delivery architecture
 
-Status: proposed development architecture
+Status: implemented local development foundation plus explicitly future designs
 
-Baseline inspected: `netdiag` v0.2.1 (`0871248`)
+Current local checkpoint: `netdiag` `0.3.0.dev3`; original baseline: v0.2.1 (`0871248`)
 
 Applies to: local UI, portable builds, LAN responder, and rescue workflows
 
@@ -12,7 +12,8 @@ Lantern should remain one diagnostic core with multiple deliberately separate
 surfaces:
 
 1. **Lantern Local** is a visible, user-launched application. It serves a static
-   interface only on a random loopback port and opens the system browser. It runs
+   interface on literal `127.0.0.1` with an operating-system-selected port and a
+   unique per-launch `*.localhost` hostname, then opens the system browser. It runs
    passive and low-impact diagnostics after consent, shows progress and evidence,
    and later brokers tightly allowlisted remediations.
 2. **Lantern Portable** packages that same application and the Python runtime as
@@ -423,7 +424,11 @@ view from the run ID stored in an HttpOnly session, not from browser-local evide
   bodies, require a per-session CSRF header, and set a restrictive Content Security
   Policy with no remote scripts, styles, images, fonts, frames, or connections.
 - Serve only packaged files from a manifest; never map a URL to a filesystem path.
-- Keep reports in memory by default. Exports are explicit browser downloads.
+- Keep reports in memory by default. The current export is an explicit browser
+  download generated from the already validated, identifier-free UI snapshot after
+  an on-screen preview. There is no report-export HTTP endpoint or second provider
+  call. Browser, operating-system, backup, and sync behavior after download remains
+  outside Lantern's control and is disclosed before download.
 - Stop after a bounded idle period when no scan/action is active. A launcher can
   reopen the extant session or start a new one.
 - Treat malicious local processes and browser extensions as residual risks. The
@@ -431,26 +436,24 @@ view from the run ID stored in an HttpOnly session, not from browser-local evide
   when added, belongs in a minimal separately reviewed helper with action-specific
   messages.
 
-Proposed local endpoints:
+Current local endpoints in `0.3.0.dev3`:
 
 ```text
-GET  /app/                               static app shell
-POST /api/v1/session/exchange            one-use launch-secret exchange
-GET  /api/v1/session                     current scope and capabilities
-POST /api/v1/runs                        start an allowlisted profile
-GET  /api/v1/runs/{run_id}               immutable snapshot
-GET  /api/v1/runs/{run_id}/events        ordered server-sent events
-POST /api/v1/runs/{run_id}/cancel        bounded cancellation request
-POST /api/v1/exports                     redacted/unredacted report download
-POST /api/v1/actions/{action_id}/preview create bound preview/approval nonce
-POST /api/v1/actions/{action_id}/apply   apply that exact approved preview
-POST /api/v1/actions/{action_id}/verify  verify an existing attempt
-POST /api/v1/actions/{action_id}/rollback rollback an eligible attempt
+GET  /app/                    static app shell and allowlisted assets
+POST /api/session/exchange    one-use launch-secret exchange
+GET  /api/session             current local session and CSRF refresh
+GET  /api/status              bounded immutable UI snapshot
+GET  /api/status/events       bounded same-origin server-sent status stream
+POST /api/diagnostics/start   one consent-bound allowlisted profile
+POST /api/diagnostics/cancel  bounded cancellation request
+POST /api/session/revoke      revoke and close the local session
 ```
 
-Action endpoints should not be enabled until the core remediation contract and
-tests exist. No endpoint accepts a program name, command line, module path, report
-file path, or unrestricted target.
+The share-safe file is serialized locally from the exact snapshot the browser has
+validated and previewed; no endpoint returns a downloadable report. Future action
+endpoints must not be enabled until the core remediation contract, privileged-helper
+boundary, and independent tests pass. No current endpoint accepts a program name,
+command line, module path, report file path, or unrestricted target.
 
 ### Presentation model
 
@@ -466,9 +469,11 @@ contract. It should contain:
 - Capability/permission matrix
 - Privacy and active-scan scope
 
-Raw report JSON remains downloadable for machine integrations. The presentation
-model is derived in Python and snapshot-tested so CLI and UI cannot disagree about
-severity, root cause, or action eligibility.
+The current UI downloads only its bounded share-safe presentation model, never raw
+`Report.data`. The presentation model is derived in Python and snapshot-tested so
+CLI and UI cannot disagree about severity, root cause, or action eligibility. A
+future raw machine-integration export would require a separate typed contract,
+preview, retention policy, and security review.
 
 ## Portable delivery
 
