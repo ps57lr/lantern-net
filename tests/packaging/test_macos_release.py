@@ -118,6 +118,10 @@ def test_load_existing_manifest_rejects_non_object(tmp_path: Path) -> None:
         release._load_existing_manifest(artifact)
 
 
+@pytest.mark.skipif(
+    release.platform.system() != "Darwin",
+    reason="Apple ditto round-trip is available only on macOS",
+)
 def test_apple_zip_round_trip_preserves_tree_bytes(tmp_path: Path) -> None:
     artifact = tmp_path / "Lantern"
     artifact.mkdir()
