@@ -12,7 +12,7 @@ from netdiag import __version__
 from netdiag.checks.dns import check_dns
 from netdiag.checks.lan import scan_lan
 from netdiag.checks.mdns import browse_mdns
-from netdiag.checks.routing import check_routing, get_routes
+from netdiag.checks.routing import check_routing
 from netdiag.checks.wifi import check_wifi
 from netdiag.findings import Finding, Severity, exit_code, worst_severity
 from netdiag.platform import OSInfo, detect_os
@@ -102,20 +102,6 @@ def run_full_scan(*, lan_ping: bool = False, mdns: bool = True) -> Report:
     if mdns:
         sections.append(("mdns", lambda: browse_mdns(osinfo)))
 
-    routes = get_routes(osinfo)
-    if routes.default_gateway:
-        from netdiag.checks.ports import scan_ports
-
-        sections.append(
-            (
-                "gateway_ports",
-                lambda: scan_ports(
-                    routes.default_gateway,
-                    ports=[53, 80, 443, 8080, 8443],
-                ),
-            )
-        )
-
     for name, fn in sections:
         section_started = time.monotonic()
         try:
@@ -134,6 +120,28 @@ def run_full_scan(*, lan_ping: bool = False, mdns: bool = True) -> Report:
         data["duration_ms"] = round((time.monotonic() - section_started) * 1000)
         report.findings.extend(findings)
         report.data[name] = data
+
+    gateway = report.data.get("routing", {}).get("default_gateway")
+    if gateway:
+        from netdiag.checks.ports import scan_ports
+
+        section_started = time.monotonic()
+        try:
+            findings, data = scan_ports(gateway, ports=[53, 80, 443, 8080, 8443])
+        except Exception as exc:  # noqa: BLE001 - isolate optional gateway probe.
+            findings = [
+                Finding(
+                    Severity.WARN,
+                    "gateway_ports",
+                    "Gateway ports check could not complete",
+                    f"{type(exc).__name__}: {exc}",
+                    hint="Re-run the ports check by itself for more detail.",
+                )
+            ]
+            data = {"error": {"type": type(exc).__name__, "message": str(exc)}}
+        data["duration_ms"] = round((time.monotonic() - section_started) * 1000)
+        report.findings.extend(findings)
+        report.data["gateway_ports"] = data
 
     report.duration_ms = round((time.monotonic() - scan_started) * 1000)
 

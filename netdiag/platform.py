@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -63,18 +64,27 @@ def run(
     timeout: float = 15.0,
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    command_env = os.environ.copy()
+    command_env["LC_ALL"] = "C"
+    command_env["LANG"] = "C"
     return subprocess.run(
         list(cmd),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         check=check,
+        env=command_env,
     )
 
 
 def run_ok(cmd: Sequence[str], *, timeout: float = 15.0) -> str:
     try:
         cp = run(cmd, timeout=timeout)
+        if cp.returncode != 0:
+            detail = (cp.stderr or cp.stdout or "no diagnostic output").strip()
+            return f"(command failed: exit {cp.returncode}: {detail})"
         return (cp.stdout or "") + (cp.stderr or "")
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         return f"(command failed: {exc})"

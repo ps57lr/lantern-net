@@ -25,6 +25,7 @@ class RouteInfo:
     default_gateway: str | None
     default_iface: str | None
     interfaces: list[Interface]
+    has_default_route: bool | None = None
 
 
 def _ping_host(host: str, count: int = 3) -> tuple[bool, str]:
@@ -44,11 +45,13 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
     interfaces: list[Interface] = []
     gateway: str | None = None
     iface: str | None = None
+    has_default_route = False
 
     if osinfo.is_mac:
         text = run_ok(["route", "-n", "get", "default"], timeout=10)
         gateway = first_match(r"^\s*gateway:\s*(\d+\.\d+\.\d+\.\d+)", text)
         iface = first_match(r"^\s*interface:\s*(\S+)", text)
+        has_default_route = bool(gateway or iface)
         if_text = run_ok(["ifconfig"], timeout=10)
         for block in re.split(r"\n(?=\S)", if_text):
             name = block.split(":")[0].split()[0]
@@ -69,8 +72,11 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                 interfaces.append(Interface(name, addrs, state, networks))
     else:
         text = run_ok(["ip", "-4", "route"], timeout=10)
-        gateway = first_match(r"default via (\d+\.\d+\.\d+\.\d+)", text)
-        iface = first_match(r"default via \d+\.\d+\.\d+\.\d+ dev (\S+)", text)
+        default_line = first_match(r"^(default\b.*)$", text)
+        has_default_route = default_line is not None
+        if default_line:
+            gateway = first_match(r"\bvia (\d+\.\d+\.\d+\.\d+)", default_line)
+            iface = first_match(r"\bdev (\S+)", default_line)
         addr_text = run_ok(["ip", "-4", "addr"], timeout=10)
         for block in re.split(r"\n(?=\d+:)", addr_text):
             m = re.match(r"\d+:\s+(\S+?):", block)
@@ -88,7 +94,7 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                         continue
                 interfaces.append(Interface(name, addrs, "up" if "UP" in block else "down", networks))
 
-    return RouteInfo(gateway, iface, interfaces)
+    return RouteInfo(gateway, iface, interfaces, has_default_route)
 
 
 def is_virtual_bridge_interface(name: str) -> bool:
@@ -135,9 +141,15 @@ def local_ipv4_networks(osinfo: OSInfo) -> list[ipaddress.IPv4Network]:
 def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
     findings: list[Finding] = []
     routes = get_routes(osinfo)
+    has_default_route = (
+        routes.has_default_route
+        if routes.has_default_route is not None
+        else bool(routes.default_gateway or routes.default_iface)
+    )
     data = {
         "default_gateway": routes.default_gateway,
         "default_interface": routes.default_iface,
+        "has_default_route": has_default_route,
         "interfaces": [
             {
                 "name": i.name,
@@ -149,7 +161,7 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
         ],
     }
 
-    if not routes.default_gateway:
+    if not has_default_route:
         findings.append(
             Finding(
                 Severity.CRIT,
@@ -161,9 +173,16 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
         )
         return findings, data
 
-    ok, ping_out = _ping_host(routes.default_gateway, count=3)
-    data["gateway_ping"] = {"ok": ok, "output": ping_out}
-    gateway_ping_ok = ok
+    gateway_ping_ok: bool | None = None
+    ping_out = ""
+    if routes.default_gateway:
+        gateway_ping_ok, ping_out = _ping_host(routes.default_gateway, count=3)
+        data["gateway_ping"] = {"ok": gateway_ping_ok, "output": ping_out}
+    else:
+        data["gateway_ping"] = {
+            "ok": None,
+            "output": "No next-hop address is present on this default route.",
+        }
 
     # External connectivity
     ping_results: list[tuple[str, str, bool, str]] = []
@@ -205,7 +224,7 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
         )
 
     internet_ok = bool(data["tcp_443"])
-    if gateway_ping_ok:
+    if gateway_ping_ok is True:
         findings.insert(
             0,
             Finding(
@@ -215,7 +234,7 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
                 f"Via {routes.default_iface or 'unknown interface'}",
             ),
         )
-    else:
+    elif gateway_ping_ok is False:
         findings.insert(
             0,
             Finding(
@@ -228,6 +247,16 @@ def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:
                     if internet_ok
                     else "Check the router, local link, VLAN, and DHCP settings."
                 ),
+            ),
+        )
+    else:
+        findings.insert(
+            0,
+            Finding(
+                Severity.INFO,
+                "route",
+                "Default route uses a point-to-point interface",
+                f"Via {routes.default_iface or 'unknown interface'}; no gateway ping applies.",
             ),
         )
 

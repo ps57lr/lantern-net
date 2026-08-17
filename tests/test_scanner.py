@@ -1,6 +1,5 @@
 from unittest.mock import patch
 
-from netdiag.checks.routing import RouteInfo
 from netdiag.findings import Severity
 from netdiag.platform import OSInfo
 from netdiag.scanner import run_full_scan
@@ -14,7 +13,6 @@ def test_probe_failure_is_contained_in_full_report():
         patch("netdiag.scanner.check_dns", return_value=okay),
         patch("netdiag.scanner.check_wifi", return_value=okay),
         patch("netdiag.scanner.scan_lan", return_value=okay),
-        patch("netdiag.scanner.get_routes", return_value=RouteInfo(None, None, [])),
     ):
         report = run_full_scan(mdns=False)
     assert report.severity == Severity.WARN.value

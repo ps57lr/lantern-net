@@ -53,3 +53,27 @@ def test_blocked_gateway_ping_is_not_an_outage_when_tcp_works():
     gateway = findings[0]
     assert gateway.severity == Severity.INFO
     assert "likely blocks ICMP" in gateway.hint
+
+
+def test_linux_point_to_point_default_route_is_not_reported_missing():
+    routes = "default dev ppp0 scope link\n"
+    addresses = "2: ppp0: <POINTOPOINT,UP>\n    inet 10.0.0.2/32 scope global ppp0\n"
+    with patch("netdiag.checks.routing.run_ok", side_effect=[routes, addresses]):
+        parsed = get_routes(LINUX)
+    assert parsed.has_default_route is True
+    assert parsed.default_gateway is None
+    assert parsed.default_iface == "ppp0"
+
+
+def test_point_to_point_route_continues_external_connectivity_checks():
+    route_info = RouteInfo(None, "ppp0", [], True)
+    with (
+        patch("netdiag.checks.routing.get_routes", return_value=route_info),
+        patch("netdiag.checks.routing._ping_host", return_value=(False, "timed out")),
+        patch("netdiag.checks.routing.socket.create_connection", return_value=nullcontext()),
+    ):
+        findings, data = check_routing(LINUX)
+    assert data["tcp_443"] is True
+    assert findings[0].severity == Severity.INFO
+    assert "point-to-point" in findings[0].title.lower()
+    assert not any(f.severity == Severity.CRIT for f in findings)
