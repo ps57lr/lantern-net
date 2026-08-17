@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import plistlib
 import subprocess
 from pathlib import Path
@@ -42,6 +43,28 @@ def _macho(path: Path) -> None:
 
 def test_reviewed_entitlements_start_empty_and_forbid_get_task_allow() -> None:
     assert macos_codesign.load_entitlement_allowlist() == {}
+
+
+def test_certificate_extraction_uses_codesign_output_prefix_syntax(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "Lantern"
+    _macho(binary)
+    leaf = b"reviewed leaf certificate"
+
+    def extract(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        options = [item for item in command if item.startswith("--extract-certificates=")]
+        assert len(options) == 1
+        prefix = Path(options[0].split("=", 1)[1])
+        Path(f"{prefix}0").write_bytes(leaf)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(macos_codesign, "_run_text", extract)
+
+    assert macos_codesign._extract_certificate_hashes(binary) == (
+        hashlib.sha1(leaf).hexdigest().upper(),
+        hashlib.sha256(leaf).hexdigest(),
+    )
 
 
 def test_signing_never_applies_executable_entitlements_to_libraries_or_frameworks(
@@ -377,7 +400,8 @@ def test_signature_verification_returns_normalized_evidence(
     _macho(binary)
     details = (
         f"Authority={EXPECTED_IDENTITY}\nTeamIdentifier={EXPECTED_TEAM_ID}\n"
-        "flags=0x10000(runtime)\nTimestamp=Aug 17, 2026 at 10:00:00 AM\n"
+        "CodeDirectory v=20500 size=5251 flags=0x10000(runtime) hashes=153+7 "
+        "location=embedded\nTimestamp=Aug 17, 2026 at 10:00:00 AM\n"
         f"CDHash={'A' * 40}\n"
         'designated => identifier "net.lantern.family-beta" and anchor apple generic\n'
     )
