@@ -191,7 +191,8 @@ def _validated_builder_runtime(
     base_prefix = Path(sys.base_prefix).resolve(strict=True)
     environment_prefix = Path(sys.prefix).resolve(strict=True)
     base_executable = Path(sys._base_executable).resolve(strict=True)
-    invoked_executable = Path(sys.executable).resolve(strict=True)
+    environment_executable = Path(sys.executable)
+    invoked_executable = environment_executable.resolve(strict=True)
     expected_executable = base_prefix / "bin" / "python3.11"
     libpython = base_prefix / "lib" / "libpython3.11.dylib"
     if (
@@ -199,6 +200,11 @@ def _validated_builder_runtime(
         or not expected_executable.is_file()
         or expected_executable.resolve(strict=True) != base_executable
         or invoked_executable != base_executable
+        or not environment_executable.is_absolute()
+        or environment_executable.name != "python"
+        or not environment_executable.is_symlink()
+        or os.readlink(str(environment_executable)) != "python3.11"
+        or environment_executable.parent.parent.resolve(strict=True) != environment_prefix
         or base_executable.is_symlink()
         or not base_executable.is_file()
         or libpython.is_symlink()
@@ -493,7 +499,7 @@ def _run_pyinstaller(
         "LANTERN_BUNDLE_SHORT_VERSION": bundle_short_version,
         "LANTERN_BUNDLE_BUILD_VERSION": bundle_build_version,
     }
-    python_executable = Path(sys.executable).resolve(strict=True)
+    python_executable = Path(sys.executable)
     if os_name == "macos":
         if (
             _validated_builder_runtime(os_name=os_name, architecture=architecture)

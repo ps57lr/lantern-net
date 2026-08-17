@@ -346,7 +346,7 @@ def test_pyinstaller_launch_is_isolated_and_strips_python_injection(
 
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[:5] == [str(Path(sys.executable).resolve()), "-I", "-B", "-m", "PyInstaller"]
+    assert command[:5] == [sys.executable, "-I", "-B", "-m", "PyInstaller"]
     assert command[-1] == str(ROOT / "packaging" / "lantern-family-beta.spec")
     environment = captured["env"]
     assert isinstance(environment, dict)
