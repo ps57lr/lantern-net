@@ -11,17 +11,19 @@ from netdiag.platform import OSInfo, which
 
 def _capture_for(cmd: list[str], timeout: float) -> str:
     """Capture a long-running browser for a bounded interval."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
-        output, _ = proc.communicate(timeout=timeout)
+        raw, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.terminate()
         try:
-            output, _ = proc.communicate(timeout=1)
+            raw, _ = proc.communicate(timeout=1)
         except subprocess.TimeoutExpired:
             proc.kill()
-            output, _ = proc.communicate()
-    return output or ""
+            raw, _ = proc.communicate()
+    if not raw:
+        return ""
+    return raw.decode("utf-8", errors="replace")
 
 
 def browse_mdns(osinfo: OSInfo, timeout: float = 5.0) -> tuple[list[Finding], dict]:
@@ -48,7 +50,17 @@ def browse_mdns(osinfo: OSInfo, timeout: float = 5.0) -> tuple[list[Finding], di
         try:
             text = _capture_for(["avahi-browse", "-atr"], timeout)
             for line in text.splitlines():
-                if line.startswith("=") and ";IPv4;" in line:
+                if not line.startswith(("+", "=")):
+                    continue
+                # "+ eth0 IPv4 Hostname _service._tcp local" (optional [MAC] before service)
+                m = re.search(
+                    r"^\+\s+\S+\s+IPv4\s+(.+?)\s+(_\S+)\s+local\s*$",
+                    line,
+                )
+                if m:
+                    services.append({"instance": m.group(1), "type": m.group(2)})
+                    continue
+                if ";IPv4;" in line:
                     parts = line.split(";")
                     if len(parts) >= 5:
                         services.append({"type": parts[4], "instance": parts[3]})
