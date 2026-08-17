@@ -405,6 +405,10 @@ h3 {
   font-weight: 720;
 }
 
+.nav-item.is-current .nav-note {
+  color: var(--ink-soft);
+}
+
 .privacy-note {
   display: flex;
   gap: 10px;

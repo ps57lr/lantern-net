@@ -79,8 +79,8 @@ _SPECS: Final[tuple[AssetSpec, ...]] = (
         route="/app/styles.css",
         filename="styles.css",
         content_type="text/css; charset=utf-8",
-        size=32_935,
-        sha256="5da809bd6b84a59c82d88f6c28fa81db4ac3d5ecab65acc98c298d1e4dfbb4fe",
+        size=32_997,
+        sha256="fa5d6d4a33cabca6923665538a48d91ade8ccec956f76470fdbb5e041f31dd93",
     ),
     AssetSpec(
         route="/app/app.js",
