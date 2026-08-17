@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 MANIFEST_NAME = "package-manifest.json"
@@ -24,6 +26,31 @@ EXCLUDED_MANIFEST_PATHS = frozenset({MANIFEST_NAME, CHECKSUM_NAME})
 
 class PackageVerificationError(RuntimeError):
     """Raised when an artifact does not match its declared package contract."""
+
+
+@dataclass(frozen=True)
+class _PublishedIdentity:
+    path: Path
+    device: int
+    inode: int
+    mode: int
+
+
+def _published_identity(path: Path) -> _PublishedIdentity:
+    details = path.lstat()
+    return _PublishedIdentity(path, details.st_dev, details.st_ino, details.st_mode)
+
+
+def _identity_matches(identity: _PublishedIdentity) -> bool:
+    try:
+        current = identity.path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        current.st_dev == identity.device
+        and current.st_ino == identity.inode
+        and stat.S_IFMT(current.st_mode) == stat.S_IFMT(identity.mode)
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -184,6 +211,139 @@ def write_manifest_checksum(root: Path) -> Path:
     except FileExistsError as exc:
         raise PackageVerificationError("manifest checksum already exists") from exc
     return target
+
+
+def replace_manifest(root: Path, manifest: Mapping[str, object]) -> Path:
+    """Replace one manifest after signing or notarization changes the artifact tree."""
+
+    target = root / MANIFEST_NAME
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    return write_manifest(root, manifest)
+
+
+def replace_manifest_checksum(root: Path) -> Path:
+    """Replace the manifest checksum after the manifest is regenerated."""
+
+    target = root / CHECKSUM_NAME
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    return write_manifest_checksum(root)
+
+
+def snapshot_tree_sha256(root: Path) -> str:
+    """Hash every file and symlink in a tree, including package metadata."""
+
+    records = collect_file_records(root, exclude=frozenset())
+    return canonical_records_sha256(records)
+
+
+def _copy_file_exclusive(source: Path, destination: Path) -> _PublishedIdentity:
+    """Copy one regular file without ever replacing the destination."""
+
+    identity: _PublishedIdentity | None = None
+    try:
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            details = os.fstat(output_stream.fileno())
+            identity = _PublishedIdentity(
+                destination,
+                details.st_dev,
+                details.st_ino,
+                details.st_mode,
+            )
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+        shutil.copystat(source, destination, follow_symlinks=False)
+        if identity is None or not _identity_matches(identity):
+            raise PackageVerificationError("published file identity changed during copy")
+        return identity
+    except Exception as exc:
+        if identity is not None:
+            raise PackageVerificationError(
+                "exclusive publication copy failed; the partial output was retained for "
+                f"manual review: {destination.name}"
+            ) from exc
+        raise
+
+
+def _copy_entry_exclusive(source: Path, destination: Path) -> _PublishedIdentity:
+    """Copy a tree entry using only exclusive destination operations."""
+
+    if source.is_symlink():
+        os.symlink(os.readlink(source), destination)
+        identity = _published_identity(destination)
+        try:
+            shutil.copystat(source, destination, follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            pass
+        if not _identity_matches(identity):
+            raise PackageVerificationError("published symbolic-link identity changed during copy")
+        return identity
+    if source.is_dir():
+        destination.mkdir(mode=stat.S_IMODE(source.stat().st_mode))
+        identity = _published_identity(destination)
+        try:
+            for child in sorted(source.iterdir(), key=lambda item: item.name):
+                _copy_entry_exclusive(child, destination / child.name)
+            shutil.copystat(source, destination, follow_symlinks=False)
+        except Exception as exc:
+            raise PackageVerificationError(
+                "exclusive publication copy failed; the partial output was retained for "
+                f"manual review: {destination.name}"
+            ) from exc
+        if not _identity_matches(identity):
+            raise PackageVerificationError("published directory identity changed during copy")
+        return identity
+    if source.is_file():
+        return _copy_file_exclusive(source, destination)
+    raise PackageVerificationError("staged output contains an unsupported entry")
+
+
+def _retained_publication_error(outputs: Sequence[_PublishedIdentity]) -> PackageVerificationError:
+    """Describe fail-safe retention without deleting through raced pathnames."""
+
+    names = sorted({identity.path.name for identity in outputs})
+    return PackageVerificationError(
+        "publication failed; paths created by this attempt were retained for safe manual "
+        "review and no automatic deletion was attempted: " + ", ".join(names)
+    )
+
+
+def publish_outputs_exclusive(
+    outputs: Sequence[tuple[Path, Path]],
+    *,
+    verify: Callable[[], None] | None = None,
+) -> None:
+    """Publish a set without replacement and retain failed paths for safe review."""
+
+    if not outputs:
+        raise PackageVerificationError("publication output set is empty")
+    destinations = [destination for _source, destination in outputs]
+    if len(destinations) != len(set(destinations)):
+        raise PackageVerificationError("publication destinations are duplicated")
+    for source, destination in outputs:
+        if source.is_symlink() or not (source.is_file() or source.is_dir()):
+            raise PackageVerificationError("staged publication source is unavailable")
+        if destination.exists() or destination.is_symlink():
+            raise PackageVerificationError(
+                f"refusing to replace existing output: {destination.name}"
+            )
+
+    created: list[_PublishedIdentity] = []
+    try:
+        for source, destination in outputs:
+            try:
+                identity = _copy_entry_exclusive(source, destination)
+            except FileExistsError as exc:
+                raise PackageVerificationError(
+                    f"refusing to replace existing output: {destination.name}"
+                ) from exc
+            created.append(identity)
+        if verify is not None:
+            verify()
+    except Exception as publish_error:
+        if created:
+            raise _retained_publication_error(created) from publish_error
+        raise
 
 
 def zip_epoch_tuple(source_epoch: int) -> tuple[int, int, int, int, int, int]:

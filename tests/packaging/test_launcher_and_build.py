@@ -20,6 +20,7 @@ from package_family_beta import (
     _publish_verified_outputs,
     _run_git,
     _run_pyinstaller,
+    _target_identity,
     _validate_build_environment,
 )
 from package_support import PackageVerificationError
@@ -37,12 +38,21 @@ def _load_launcher():
 
 
 def test_bundle_versions_map_pep440_development_version_to_numeric_values() -> None:
-    assert _bundle_versions("0.3.0.dev3") == ("0.3.0", "3")
+    assert _bundle_versions("0.3.0.dev4") == ("0.3.0", "4")
+
+
+def test_macos_packaging_is_arm64_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(package_family_beta.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(package_family_beta.platform, "machine", lambda: "x86_64")
+
+    with pytest.raises(PackageVerificationError, match="macOS arm64"):
+        _target_identity()
 
 
 def test_isolated_spec_uses_only_explicit_reviewed_package_data() -> None:
     spec = (ROOT / "packaging" / "lantern-family-beta.spec").read_text(encoding="utf-8")
     assert "collect_data_files" not in spec
+    assert 'if target_arch != "arm64":' in spec
     for filename in (
         "report-1.1.schema.json",
         "index.html",
@@ -162,7 +172,7 @@ def test_notices_do_not_overstate_unsigned_artifact_trust() -> None:
     assert "no updater, installer" not in combined
 
 
-def test_publication_never_replaces_existing_output_and_cleans_its_reservation(
+def test_publication_never_replaces_existing_output_or_creates_another_destination(
     tmp_path: Path,
 ) -> None:
     staged = tmp_path / "staged"
@@ -181,7 +191,7 @@ def test_publication_never_replaces_existing_output_and_cleans_its_reservation(
     checksum_destination = output / "artifact.zip.sha256"
     archive_destination.write_bytes(b"existing archive")
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(PackageVerificationError, match="refusing to replace"):
         _publish_outputs(
             artifact,
             archive,
@@ -222,7 +232,7 @@ def test_publication_preserves_symlinks_and_refuses_existing_artifact(tmp_path: 
     assert (destination / "link").is_symlink()
     assert (destination / "link").read_text(encoding="utf-8") == "payload"
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(PackageVerificationError, match="refusing to replace"):
         _publish_outputs(
             artifact,
             archive,
@@ -234,7 +244,7 @@ def test_publication_preserves_symlinks_and_refuses_existing_artifact(tmp_path: 
     assert (destination / "file").read_text(encoding="utf-8") == "payload"
 
 
-def test_failed_postpublication_verification_removes_only_reserved_outputs(
+def test_failed_postpublication_verification_retains_only_reserved_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     staged = tmp_path / "staged"
@@ -259,7 +269,7 @@ def test_failed_postpublication_verification_removes_only_reserved_outputs(
         raise RuntimeError("synthetic postpublication failure")
 
     monkeypatch.setattr(package_family_beta, "_verify_published_outputs", fail_verification)
-    with pytest.raises(RuntimeError, match="postpublication"):
+    with pytest.raises(PackageVerificationError, match="retained for safe manual review"):
         _publish_verified_outputs(
             artifact,
             archive,
@@ -267,7 +277,9 @@ def test_failed_postpublication_verification_removes_only_reserved_outputs(
             *destinations,
             dirty=True,
         )
-    assert all(not path.exists() for path in destinations)
+    assert (destinations[0] / "file").read_text(encoding="utf-8") == "payload"
+    assert destinations[1].read_bytes() == b"archive"
+    assert destinations[2].read_text(encoding="ascii") == "checksum"
     assert unrelated.read_text(encoding="utf-8") == "unrelated"
 
 
@@ -323,11 +335,18 @@ def test_pyinstaller_launch_is_isolated_and_strips_python_injection(
         monkeypatch.setenv(variable, f"untrusted-{variable.lower()}")
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr(package_family_beta.subprocess, "run", fake_run)
-    dist = _run_pyinstaller(tmp_path, version="0.3.0.dev3", source_epoch=1_700_000_000)
+    dist = _run_pyinstaller(
+        tmp_path,
+        version="0.3.0.dev4",
+        source_epoch=1_700_000_000,
+        os_name="linux",
+        architecture="x86_64",
+        builder_runtime=None,
+    )
 
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[:4] == [sys.executable, "-I", "-m", "PyInstaller"]
+    assert command[:5] == [str(Path(sys.executable).resolve()), "-I", "-B", "-m", "PyInstaller"]
     assert command[-1] == str(ROOT / "packaging" / "lantern-family-beta.spec")
     environment = captured["env"]
     assert isinstance(environment, dict)
@@ -341,7 +360,7 @@ def test_pyinstaller_launch_is_isolated_and_strips_python_injection(
         "CC",
         "CFLAGS",
     }.intersection(environment)
-    assert set(environment) == {
+    expected_environment = {
         "PATH",
         "HOME",
         "TMPDIR",
@@ -349,6 +368,7 @@ def test_pyinstaller_launch_is_isolated_and_strips_python_injection(
         "TEMP",
         "PYINSTALLER_CONFIG_DIR",
         "PYTHONNOUSERSITE",
+        "PYTHONDONTWRITEBYTECODE",
         "PYTHONHASHSEED",
         "SOURCE_DATE_EPOCH",
         "LANG",
@@ -357,13 +377,15 @@ def test_pyinstaller_launch_is_isolated_and_strips_python_injection(
         "LANTERN_BUNDLE_SHORT_VERSION",
         "LANTERN_BUNDLE_BUILD_VERSION",
     }
+    assert set(environment) == expected_environment
     assert environment["PATH"] == "/usr/bin:/bin"
     assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
     assert environment["PYTHONHASHSEED"] == "0"
     assert environment["SOURCE_DATE_EPOCH"] == "1700000000"
-    assert environment["LANTERN_BUILD_VERSION"] == "0.3.0.dev3"
+    assert environment["LANTERN_BUILD_VERSION"] == "0.3.0.dev4"
     assert environment["LANTERN_BUNDLE_SHORT_VERSION"] == "0.3.0"
-    assert environment["LANTERN_BUNDLE_BUILD_VERSION"] == "3"
+    assert environment["LANTERN_BUNDLE_BUILD_VERSION"] == "4"
     assert captured["cwd"] == ROOT
     assert captured["check"] is True
     assert dist == tmp_path / "pyinstaller-dist"

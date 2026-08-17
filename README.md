@@ -2,7 +2,7 @@
 
 Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working development build includes the `netdiag` command-line utility and a local browser interface for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
 
-> **Development status:** the current package is `0.3.0.dev3`. It is not production software, a remote-support service, an organization-wide network assessment, or an automatic repair tool. Use it only on computers and networks you own, manage, or are explicitly authorized to assess.
+> **Development status:** the current source line is `0.3.0.dev4`. It adds signing-aware packaging work, but it is not a distributable family beta unless and until a clean Developer ID signed, Apple-notarized, stapled artifact passes the release gates. Even then, it remains a limited family beta—not production software, a remote-support service, an organization-wide network assessment, or an automatic repair tool. Use it only on computers and networks you own, manage, or are explicitly authorized to assess.
 
 ## What works today
 
@@ -22,7 +22,7 @@ The project also contains safety foundations for the intended future product. Th
 - Read-only rescue assessment models and reviewed manual guidance. Lantern does not currently boot a computer, enter Safe Mode or Recovery, repair a disk, unlock encrypted data, or determine hardware viability on its own.
 - Security building blocks for a future LAN support mode. Non-loopback serving is hard-disabled, so this build cannot expose Lantern to another device on the network.
 - A disabled, offline authorized-assessment envelope and coverage planner for defining written authority, exact private scope, exclusions, hard stops, technique budgets, vantage points, and data handling before any future scanner exists. It produces no evidence or compliance conclusion and is not wired to the CLI or UI.
-- A locked local-developer packaging pipeline for a visibly launched macOS app or Linux one-folder build. It verifies frozen assets offline and labels unsigned builds honestly; it is not yet a signed, notarized family handoff.
+- A locked local-developer packaging pipeline for a visibly launched macOS app or Linux one-folder build. The dev4 line adds signing-aware macOS release foundations, while offline verification and explicit trust labels remain mandatory. No clean, signed, Apple-notarized, stapled family handoff has passed the release gates yet.
 
 There is no USB launcher or automatic execution in this build, and Windows diagnostic parity has not been implemented.
 

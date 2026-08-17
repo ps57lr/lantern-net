@@ -15,6 +15,7 @@ from package_support import (
     canonical_records_sha256,
     collect_file_records,
     create_reproducible_zip,
+    publish_outputs_exclusive,
     write_manifest,
     write_manifest_checksum,
 )
@@ -168,3 +169,117 @@ def test_zip_enforces_total_member_count_including_directories(
 
     with pytest.raises(PackageVerificationError, match="too many members"):
         assert_zip_matches_tree(artifact, archive)
+
+
+def test_exclusive_publication_checks_all_collisions_before_copying(tmp_path: Path) -> None:
+    first = tmp_path / "first.source"
+    second = tmp_path / "second.source"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    first_destination = tmp_path / "first.output"
+    second_destination = tmp_path / "second.output"
+    second_destination.write_bytes(b"do not replace")
+
+    with pytest.raises(PackageVerificationError, match="refusing to replace"):
+        publish_outputs_exclusive(((first, first_destination), (second, second_destination)))
+
+    assert not first_destination.exists()
+    assert second_destination.read_bytes() == b"do not replace"
+
+
+def test_exclusive_publication_retains_created_outputs_on_verification_failure(
+    tmp_path: Path,
+) -> None:
+    source_tree = tmp_path / "source-tree"
+    source_tree.mkdir()
+    (source_tree / "file").write_bytes(b"payload")
+    source_file = tmp_path / "source-file"
+    source_file.write_bytes(b"archive")
+    tree_destination = tmp_path / "published-tree"
+    file_destination = tmp_path / "published-file"
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_bytes(b"keep")
+
+    def reject() -> None:
+        raise PackageVerificationError("post-copy verification failed")
+
+    with pytest.raises(PackageVerificationError, match="retained for safe manual review"):
+        publish_outputs_exclusive(
+            ((source_tree, tree_destination), (source_file, file_destination)),
+            verify=reject,
+        )
+
+    assert (tree_destination / "file").read_bytes() == b"payload"
+    assert file_destination.read_bytes() == b"archive"
+    assert unrelated.read_bytes() == b"keep"
+
+
+def test_exclusive_publication_retains_first_output_after_racing_second_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.source"
+    second = tmp_path / "second.source"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    first_destination = tmp_path / "first.output"
+    second_destination = tmp_path / "second.output"
+    original = package_support._copy_entry_exclusive
+    calls = 0
+
+    def collide(source: Path, destination: Path) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            destination.write_bytes(b"racer")
+            raise FileExistsError(destination)
+        return original(source, destination)
+
+    monkeypatch.setattr(package_support, "_copy_entry_exclusive", collide)
+    with pytest.raises(PackageVerificationError, match="retained for safe manual review"):
+        publish_outputs_exclusive(((first, first_destination), (second, second_destination)))
+
+    assert first_destination.read_bytes() == b"first"
+    assert second_destination.read_bytes() == b"racer"
+
+
+def test_failed_publication_never_deletes_a_replacement(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"published")
+    destination = tmp_path / "destination"
+    moved = tmp_path / "moved-created-output"
+
+    def replace_then_reject() -> None:
+        destination.rename(moved)
+        destination.write_bytes(b"unrelated replacement")
+        raise PackageVerificationError("synthetic verification failure")
+
+    with pytest.raises(PackageVerificationError, match="retained for safe manual review"):
+        publish_outputs_exclusive(((source, destination),), verify=replace_then_reject)
+
+    assert destination.read_bytes() == b"unrelated replacement"
+    assert moved.read_bytes() == b"published"
+
+
+def test_publication_failure_never_uses_path_based_recursive_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_text("keep", encoding="utf-8")
+    destination = tmp_path / "destination"
+
+    def forbidden_cleanup(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("path-based recursive cleanup must not run")
+
+    monkeypatch.setattr(package_support.shutil, "rmtree", forbidden_cleanup)
+
+    with pytest.raises(PackageVerificationError, match="retained for safe manual review"):
+        publish_outputs_exclusive(
+            ((source, destination),),
+            verify=lambda: (_ for _ in ()).throw(RuntimeError("reject")),
+        )
+
+    assert (destination / "payload").read_text(encoding="utf-8") == "keep"

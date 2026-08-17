@@ -2,7 +2,7 @@
 
 Status: implemented local development foundation plus explicitly future designs
 
-Current local checkpoint: `netdiag` `0.3.0.dev3`; original baseline: v0.2.1 (`0871248`)
+Current local checkpoint: `netdiag` `0.3.0.dev4`; original baseline: v0.2.1 (`0871248`)
 
 Applies to: local UI, portable builds, LAN responder, and rescue workflows
 
@@ -436,7 +436,7 @@ view from the run ID stored in an HttpOnly session, not from browser-local evide
   when added, belongs in a minimal separately reviewed helper with action-specific
   messages.
 
-Current local endpoints in `0.3.0.dev3`:
+Current local endpoints in `0.3.0.dev4`:
 
 ```text
 GET  /app/                    static app shell and allowlisted assets
@@ -486,8 +486,9 @@ dependency, not a core runtime dependency.
 
 Build on the target OS; do not claim cross-compiled equivalence:
 
-- macOS: build arm64 and x86_64 `.app` artifacts on matching runners. Evaluate a
-  universal2 merge only after both native builds pass. A development build is
+- macOS: the dev4 candidate supports arm64 only, built with the exact pinned arm64
+  runtime. A future x86_64 or universal2 build requires its own pinned runtime,
+  native test host, signing inventory, and minimum-OS proof. A development build is
   explicitly unsigned until Developer ID signing and notarization are completed.
 - Windows: build an x64 application directory with `Start Lantern.exe`; add arm64
   only after collectors and CI actually run there. SmartScreen reputation and code
@@ -510,6 +511,11 @@ Checksums detect accidental corruption but do not authenticate a writable USB. A
 family-grade release requires signed artifacts, macOS notarization, protected build
 provenance, and verified updates. The app never adds persistence, installs a service,
 or changes host configuration merely because it runs from removable media.
+
+The dev4 source line adds signing-aware packaging foundations only. It is not a
+family handoff until a clean Developer ID signed artifact is accepted by Apple,
+stapled, independently verified, and opened successfully on a clean supported Mac.
+Passing those gates makes it a limited family beta, not a production release.
 
 ### Build inputs and outputs
 
@@ -541,8 +547,9 @@ Swift component or app capability that:
    interface index, network boundary, and MAC address again in the parent;
 3. is built in the protected pipeline, bundled with Lantern, and signed with the
    parent application using the minimum reviewed entitlement or capability;
-4. is tested under the actual signed/frozen process topology on arm64 and x86_64,
-   including restricted visibility, malformed output, timeout, and cleanup cases.
+4. is tested under the actual signed/frozen process topology on every claimed
+   architecture (currently arm64 only), including restricted visibility, malformed
+   output, timeout, and cleanup cases.
 
 This component would remain read-only and distinct from any future privileged
 remediation helper. Until that gate passes, partial neighbor/MAC visibility is an

@@ -2,7 +2,7 @@
 
 Status: living threat model; original Phase 0 review plus current local checkpoint
 Review date: 2026-08-17
-Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev3`
+Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev4`
 Applies to: Lantern Core, Portable, local UI, LAN responder, and Rescue
 
 ## Executive decision
@@ -43,6 +43,11 @@ presentation contracts, consent-bound passive/low-impact profiles, cancellation,
 structural redaction, a reviewed local-file preview, and dry-run/read-only safety
 foundations. It does not add a LAN listener, credentials, real remediation, rescue
 writes, automatic execution, an updater, or a production trust claim.
+
+Dev4 adds signing-aware packaging work, not a completed trust claim. Family
+distribution remains blocked until a clean Developer ID signed, Apple-notarized,
+stapled artifact passes independent Gatekeeper and clean-machine opening tests. A
+passing artifact would remain a limited family beta rather than production software.
 
 ### Original baseline (historical)
 

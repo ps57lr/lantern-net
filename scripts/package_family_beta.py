@@ -8,9 +8,9 @@ import json
 import os
 import platform
 import re
-import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 
@@ -20,7 +20,9 @@ from package_support import (
     canonical_records_sha256,
     collect_file_records,
     create_reproducible_zip,
+    publish_outputs_exclusive,
     sha256_file,
+    snapshot_tree_sha256,
     write_manifest,
     write_manifest_checksum,
 )
@@ -28,6 +30,7 @@ from package_support import (
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "packaging" / "lantern-family-beta.spec"
 BUILD_LOCK = ROOT / "packaging" / "requirements-build.lock"
+MACOS_RUNTIME_LOCK = ROOT / "packaging" / "macos" / "runtime.lock.json"
 PYINSTALLER_VERSION = "6.22.1"
 SYSTEM_GIT = Path("/usr/bin/git")
 BUILD_PACKAGES = {
@@ -40,6 +43,48 @@ BUILD_PACKAGES = {
 DARWIN_BUILD_PACKAGES = {"macholib": "1.16.4"}
 _VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:\.(?:dev|post)[0-9]+)?\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_MACOS_WHEELS = {
+    "altgraph-0.17.5-py2.py3-none-any.whl": (
+        "f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597"
+    ),
+    "macholib-1.16.4-py2.py3-none-any.whl": (
+        "da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea"
+    ),
+    "packaging-26.3-py3-none-any.whl": (
+        "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+    ),
+    "pyinstaller-6.22.1-py3-none-macosx_10_13_universal2.whl": (
+        "d519a5549bf560407a9cffa8547f278e79c1093dc1cade6d9658c67b650d66c4"
+    ),
+    "pyinstaller_hooks_contrib-2026.6-py3-none-any.whl": (
+        "fd13b8ac126b35361175edacd41a0d97080b75dd5f4b594ecefefff969509dd3"
+    ),
+    "setuptools-84.0.0-py3-none-any.whl": (
+        "51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670"
+    ),
+}
+_MACOS_RUNTIME = {
+    "architecture": "arm64",
+    "archive": "cpython-3.11.15+20260728-aarch64-apple-darwin-install_only.tar.gz",
+    "archive_sha256": "7dc10e31eede05a6ab1ec9e0b961f521078b0959f838ed1d7452597d529ff802",
+    "build_site_packages_sha256": "d027604b53d335f21c22687cfa4e69d83c7a1468664ebbbe502f5377388bb5fd",
+    "libpython": "python/lib/libpython3.11.dylib",
+    "libpython_sha256": "39669f88807bff419376e0ba17ae68d194f065f7959fb61cd4777af65da09e51",
+    "minimum_macos": "11.0",
+    "provider": "Astral python-build-standalone",
+    "python_executable": "python/bin/python3.11",
+    "python_executable_sha256": "95c331c5e61804b2dcea00dd105fbf7c9e417aaabff23fa5da6758d84033029d",
+    "release": "20260728",
+    "runtime_tree_sha256": "89f2b0d5e85dc62c5ec225dc850e097f863c7406d23a2835a4e983f050ee093d",
+    "schema": "lantern.macos-runtime.v1",
+    "url": (
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20260728/"
+        "cpython-3.11.15%2B20260728-aarch64-apple-darwin-install_only.tar.gz"
+    ),
+    "version": "3.11.15",
+    "wheels": _MACOS_WHEELS,
+}
 
 
 def _run_git(*arguments: str) -> str:
@@ -85,6 +130,112 @@ def _source_identity(*, allow_dirty: bool) -> tuple[str, bool, int]:
     return commit, dirty, source_epoch
 
 
+def _assert_source_unchanged(*, commit: str, dirty: bool) -> None:
+    """Recheck the source identity after build work, before any publication."""
+
+    if _run_git("rev-parse", "HEAD") != commit:
+        raise PackageVerificationError("source commit changed during the package build")
+    current_dirty = bool(_run_git("status", "--porcelain=v1", "--untracked-files=all"))
+    if current_dirty is not dirty:
+        raise PackageVerificationError("source clean state changed during the package build")
+
+
+def _load_macos_runtime_lock() -> dict[str, object]:
+    if (
+        MACOS_RUNTIME_LOCK.is_symlink()
+        or not MACOS_RUNTIME_LOCK.is_file()
+        or MACOS_RUNTIME_LOCK.stat().st_size > 64 * 1024
+    ):
+        raise PackageVerificationError("reviewed macOS runtime lock is unavailable")
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise PackageVerificationError("macOS runtime lock contains duplicate keys")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            MACOS_RUNTIME_LOCK.read_text(encoding="utf-8"),
+            object_pairs_hook=object_pairs,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise PackageVerificationError("reviewed macOS runtime lock is invalid") from exc
+    if value != _MACOS_RUNTIME:
+        raise PackageVerificationError("macOS runtime lock does not match the reviewed runtime")
+    return value
+
+
+def _validated_builder_runtime(
+    *,
+    os_name: str,
+    architecture: str,
+) -> dict[str, object] | None:
+    """Bind a macOS artifact to the exact reviewed interpreter and shared library."""
+
+    if os_name != "macos":
+        return None
+    lock = _load_macos_runtime_lock()
+    if (
+        architecture != lock["architecture"]
+        or platform.system() != "Darwin"
+        or platform.machine().lower() != lock["architecture"]
+        or platform.python_version() != lock["version"]
+        or sys.implementation.name != "cpython"
+        or sysconfig.get_config_var("MACOSX_DEPLOYMENT_TARGET") != lock["minimum_macos"]
+    ):
+        raise PackageVerificationError("builder Python does not match the reviewed macOS runtime")
+
+    base_prefix = Path(sys.base_prefix).resolve(strict=True)
+    environment_prefix = Path(sys.prefix).resolve(strict=True)
+    base_executable = Path(sys._base_executable).resolve(strict=True)
+    invoked_executable = Path(sys.executable).resolve(strict=True)
+    expected_executable = base_prefix / "bin" / "python3.11"
+    libpython = base_prefix / "lib" / "libpython3.11.dylib"
+    if (
+        expected_executable.is_symlink()
+        or not expected_executable.is_file()
+        or expected_executable.resolve(strict=True) != base_executable
+        or invoked_executable != base_executable
+        or base_executable.is_symlink()
+        or not base_executable.is_file()
+        or libpython.is_symlink()
+        or not libpython.is_file()
+    ):
+        raise PackageVerificationError("reviewed macOS runtime files are unavailable")
+    if (
+        sha256_file(base_executable) != lock["python_executable_sha256"]
+        or sha256_file(libpython) != lock["libpython_sha256"]
+    ):
+        raise PackageVerificationError("builder Python bytes do not match the reviewed runtime")
+
+    site_packages = environment_prefix / "lib" / "python3.11" / "site-packages"
+    if (
+        environment_prefix == base_prefix
+        or site_packages.is_symlink()
+        or not site_packages.is_dir()
+        or snapshot_tree_sha256(base_prefix) != lock["runtime_tree_sha256"]
+        or snapshot_tree_sha256(site_packages) != lock["build_site_packages_sha256"]
+    ):
+        raise PackageVerificationError("macOS build environment does not match the reviewed lock")
+
+    return {
+        "schema": "lantern.macos-builder-runtime.v1",
+        "provider": lock["provider"],
+        "version": lock["version"],
+        "architecture": lock["architecture"],
+        "minimum_macos": lock["minimum_macos"],
+        "runtime_lock_sha256": sha256_file(MACOS_RUNTIME_LOCK),
+        "runtime_archive_sha256": lock["archive_sha256"],
+        "runtime_tree_sha256": lock["runtime_tree_sha256"],
+        "build_site_packages_sha256": lock["build_site_packages_sha256"],
+        "python_executable_sha256": lock["python_executable_sha256"],
+        "libpython_sha256": lock["libpython_sha256"],
+    }
+
+
 def _validate_build_environment() -> None:
     for distribution, expected in BUILD_PACKAGES.items():
         try:
@@ -114,13 +265,18 @@ def _validate_build_environment() -> None:
 def _target_identity() -> tuple[str, str]:
     system = platform.system()
     machine = platform.machine().lower()
-    os_name = {"Darwin": "macos", "Linux": "linux"}.get(system)
     architecture = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x86_64"}.get(machine)
-    if os_name is None or architecture is None:
+    if system == "Darwin" and architecture == "arm64":
+        return "macos", "arm64"
+    if system == "Linux" and architecture in {"arm64", "x86_64"}:
+        return "linux", architecture
+    if architecture is None:
         raise PackageVerificationError(
-            "family-beta packaging currently supports macOS/Linux on arm64 or x86_64"
+            "family-beta packaging does not support this processor architecture"
         )
-    return os_name, architecture
+    raise PackageVerificationError(
+        "family-beta packaging currently supports macOS arm64 and glibc Linux arm64/x86_64"
+    )
 
 
 def _project_contracts() -> tuple[str, dict[str, object]]:
@@ -253,6 +409,7 @@ def _build_manifest(
     commit: str,
     dirty: bool,
     source_epoch: int,
+    builder_runtime: dict[str, object] | None,
 ) -> dict[str, object]:
     payload = (
         "Start Lantern (Unsigned Dev).app" if os_name == "macos" else "Start Lantern (Unsigned Dev)"
@@ -294,6 +451,7 @@ def _build_manifest(
             "pyinstaller": PYINSTALLER_VERSION,
             "build_inputs": "locked-python-wheels-and-reviewed-spec",
             "build_lock_sha256": sha256_file(BUILD_LOCK),
+            "builder_runtime": builder_runtime,
         },
         "files": records,
         "tree_sha256": canonical_records_sha256(records),
@@ -305,6 +463,9 @@ def _run_pyinstaller(
     *,
     version: str,
     source_epoch: int,
+    os_name: str,
+    architecture: str,
+    builder_runtime: dict[str, object] | None,
 ) -> Path:
     dist = staging / "pyinstaller-dist"
     work = staging / "pyinstaller-work"
@@ -324,6 +485,7 @@ def _run_pyinstaller(
         "PYINSTALLER_CONFIG_DIR": str(pyinstaller_config),
         "PYTHONHASHSEED": "0",
         "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "SOURCE_DATE_EPOCH": str(source_epoch),
         "LANG": "C",
         "LC_ALL": "C",
@@ -331,10 +493,28 @@ def _run_pyinstaller(
         "LANTERN_BUNDLE_SHORT_VERSION": bundle_short_version,
         "LANTERN_BUNDLE_BUILD_VERSION": bundle_build_version,
     }
+    python_executable = Path(sys.executable).resolve(strict=True)
+    if os_name == "macos":
+        if (
+            _validated_builder_runtime(os_name=os_name, architecture=architecture)
+            != builder_runtime
+        ):
+            raise PackageVerificationError("macOS build environment changed before PyInstaller")
+        target_arch = platform.machine()
+        if target_arch != "arm64":
+            raise PackageVerificationError("unsupported macOS build architecture")
+        environment.update(
+            {
+                "LANTERN_TARGET_ARCH": target_arch,
+                "MACOSX_DEPLOYMENT_TARGET": "11.0",
+                "PYTHON_JIT": "0",
+            }
+        )
     subprocess.run(
         [
-            sys.executable,
+            str(python_executable),
             "-I",
+            "-B",
             "-m",
             "PyInstaller",
             "--clean",
@@ -353,51 +533,6 @@ def _run_pyinstaller(
     return dist
 
 
-def _copy_file_exclusive(source: Path, destination: Path) -> None:
-    """Copy one file through an exclusive destination create; never replace."""
-
-    created = False
-    try:
-        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
-            created = True
-            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
-        shutil.copymode(source, destination, follow_symlinks=False)
-    except Exception:
-        if created:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
-        raise
-
-
-def _copy_entry_exclusive(source: Path, destination: Path) -> None:
-    """Copy one tree entry using only no-replace destination operations."""
-
-    if source.is_symlink():
-        os.symlink(os.readlink(source), destination)
-        try:
-            shutil.copystat(source, destination, follow_symlinks=False)
-        except (NotImplementedError, OSError):
-            pass
-        return
-    if source.is_dir():
-        destination.mkdir(mode=source.stat().st_mode & 0o777)
-        try:
-            for child in sorted(source.iterdir(), key=lambda item: item.name):
-                _copy_entry_exclusive(child, destination / child.name)
-            shutil.copystat(source, destination, follow_symlinks=False)
-        except Exception:
-            shutil.rmtree(destination)
-            raise
-        return
-    if source.is_file():
-        _copy_file_exclusive(source, destination)
-        shutil.copystat(source, destination, follow_symlinks=False)
-        return
-    raise PackageVerificationError("staged artifact contains an unsupported entry")
-
-
 def _publish_outputs(
     artifact: Path,
     archive: Path,
@@ -406,43 +541,15 @@ def _publish_outputs(
     archive_destination: Path,
     archive_checksum_destination: Path,
 ) -> None:
-    """Publish through exclusive creates and remove only outputs created by this call."""
+    """Publish through the shared no-replace, fail-safe retention boundary."""
 
-    created: list[Path] = []
-    try:
-        artifact_destination.mkdir(mode=artifact.stat().st_mode & 0o777)
-        created.append(artifact_destination)
-        for child in sorted(artifact.iterdir(), key=lambda item: item.name):
-            _copy_entry_exclusive(child, artifact_destination / child.name)
-        shutil.copystat(artifact, artifact_destination, follow_symlinks=False)
-        _copy_file_exclusive(archive, archive_destination)
-        created.append(archive_destination)
-        _copy_file_exclusive(archive_checksum, archive_checksum_destination)
-        created.append(archive_checksum_destination)
-    except Exception as publish_error:
-        try:
-            _remove_reserved_outputs(tuple(created))
-        except PackageVerificationError as cleanup_error:
-            raise cleanup_error from publish_error
-        raise
-
-
-def _remove_reserved_outputs(paths: tuple[Path, ...]) -> None:
-    """Remove only outputs exclusively created by the current publication attempt."""
-
-    failures: list[str] = []
-    for path in reversed(paths):
-        try:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path)
-            elif path.exists() or path.is_symlink():
-                path.unlink()
-        except OSError:
-            failures.append(path.name)
-    if failures:
-        raise PackageVerificationError(
-            "failed publication could not be fully removed: " + ", ".join(sorted(failures))
+    publish_outputs_exclusive(
+        (
+            (artifact, artifact_destination),
+            (archive, archive_destination),
+            (archive_checksum, archive_checksum_destination),
         )
+    )
 
 
 def _verify_published_outputs(
@@ -478,28 +585,23 @@ def _publish_verified_outputs(
     *,
     dirty: bool,
 ) -> None:
-    """Publish, reverify the copied bytes, and remove the reserved set on failure."""
+    """Publish and reverify, retaining any failed paths for manual review."""
 
-    destinations = (
-        artifact_destination,
-        archive_destination,
-        archive_checksum_destination,
-    )
-    _publish_outputs(
-        artifact,
-        archive,
-        archive_checksum,
-        *destinations,
-    )
-    try:
+    def verify() -> None:
         _verify_published_outputs(
             artifact_destination,
             archive_destination,
             dirty=dirty,
         )
-    except Exception:
-        _remove_reserved_outputs(destinations)
-        raise
+
+    publish_outputs_exclusive(
+        (
+            (artifact, artifact_destination),
+            (archive, archive_destination),
+            (archive_checksum, archive_checksum_destination),
+        ),
+        verify=verify,
+    )
 
 
 def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[str, object]:
@@ -507,6 +609,7 @@ def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[s
 
     _validate_build_environment()
     os_name, architecture = _target_identity()
+    builder_runtime = _validated_builder_runtime(os_name=os_name, architecture=architecture)
     commit, dirty, source_epoch = _source_identity(allow_dirty=allow_dirty)
     version, contracts = _project_contracts()
 
@@ -533,7 +636,20 @@ def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[s
 
     with tempfile.TemporaryDirectory(prefix=".lantern-family-build-", dir=output_base) as temporary:
         staging = Path(temporary)
-        dist = _run_pyinstaller(staging, version=version, source_epoch=source_epoch)
+        dist = _run_pyinstaller(
+            staging,
+            version=version,
+            source_epoch=source_epoch,
+            os_name=os_name,
+            architecture=architecture,
+            builder_runtime=builder_runtime,
+        )
+        if (
+            _validated_builder_runtime(os_name=os_name, architecture=architecture)
+            != builder_runtime
+        ):
+            raise PackageVerificationError("build environment changed during PyInstaller")
+        _assert_source_unchanged(commit=commit, dirty=dirty)
         pyinstaller_payload = _pyinstaller_payload(dist, os_name=os_name)
         artifact = staging / artifact_name
         artifact.mkdir(mode=0o755)
@@ -556,6 +672,7 @@ def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[s
             commit=commit,
             dirty=dirty,
             source_epoch=source_epoch,
+            builder_runtime=builder_runtime,
         )
         write_manifest(artifact, manifest)
         write_manifest_checksum(artifact)
@@ -578,6 +695,8 @@ def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[s
         archive_checksum = staging / archive_checksum_destination.name
         _write_exclusive(archive_checksum, f"{sha256_file(archive)}  {archive.name}\n")
 
+        _assert_source_unchanged(commit=commit, dirty=dirty)
+
         _publish_verified_outputs(
             artifact,
             archive,
@@ -594,6 +713,10 @@ def build_family_beta(output_base: Path, *, allow_dirty: bool = False) -> dict[s
         "archive": str(archive_destination),
         "archive_sha256": sha256_file(archive_destination),
         "manifest_sha256": sha256_file(artifact_destination / "package-manifest.json"),
+        "artifact_snapshot_sha256": snapshot_tree_sha256(artifact_destination),
+        "tree_sha256": manifest["tree_sha256"],
+        "build_lock_sha256": sha256_file(BUILD_LOCK),
+        "builder_runtime": builder_runtime,
         "version": version,
         "target": {"os": os_name, "architecture": architecture},
         "source_commit": commit,
