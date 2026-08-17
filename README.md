@@ -2,12 +2,14 @@
 
 Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working development build includes the `netdiag` command-line utility and a local browser interface for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
 
-> **Development status:** the current package is `0.3.0.dev0`. It is not production software, a remote-support service, or an automatic repair tool. Use it only on computers and networks you own or are authorized to test.
+> **Development status:** the current package is `0.3.0.dev1`. It is not production software, a remote-support service, an organization-wide network assessment, or an automatic repair tool. Use it only on computers and networks you own, manage, or are explicitly authorized to assess.
 
 ## What works today
 
 - A usable macOS and Linux CLI with bounded network probes and per-check failure isolation.
 - A modern local UI launched with `netdiag ui`. It binds only to this computer, starts nothing automatically, defaults to passive observation, and requires fresh consent for each run.
+- An evidence-bounded UI conclusion with confidence and coverage, up to three priority items, a safe next step, an independent five-layer **Lantern Path**, and identifier-free module detail.
+- Goal-based presentation for troubleshooting, endpoint network evaluation, and recovery context. A goal can change wording and priority order, but never packet activity, targets, or diagnostic scope.
 - Human-readable reports with an overall assessment, coverage, findings, and suggested next steps.
 - Typed JSON reports using the additive `1.1` report schema, including stable finding codes, structured evidence, confidence, and check outcomes.
 - A share-safe `--redact` mode for full reports. It structurally removes or replaces sensitive identifiers instead of relying on text replacement.
@@ -21,6 +23,12 @@ The project also contains safety foundations for the intended future product. Th
 - Security building blocks for a future LAN support mode. Non-loopback serving is hard-disabled, so this build cannot expose Lantern to another device on the network.
 
 There is no USB launcher or automatic execution in this build, and Windows diagnostic parity has not been implemented.
+
+## Product lanes
+
+The working build is the **personal support** lane: one person, one computer, and its immediate network path. The **Evaluate this network** goal remains an endpoint view; it does not inspect an entire household, business, financial environment, or municipality and cannot certify security or compliance.
+
+The planned **authorized network assessment** lane is intentionally separate. It will require written scope, exclusions, approved techniques, packet and time budgets, emergency stop contacts, evidence provenance, and multiple approved vantage points before broader discovery is enabled. Regulated-environment work will add reviewed framework mappings without turning Lantern into an auditor or attestation authority. See [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged design and explicit non-goals.
 
 ## Install for development
 
@@ -159,3 +167,13 @@ ruff format --check .
 Checks return structured findings and evidence instead of printing directly. This keeps collection separate from terminal presentation, JSON serialization, the future local UI, and any later consent-based support transport.
 
 Architecture and safety decisions are documented under [`docs/architecture`](docs/architecture). See [`docs/ENTERPRISE.md`](docs/ENTERPRISE.md) for the staged path from a dependable local utility to a consent-based product.
+
+The repository also includes deterministic browser acceptance tests. They use a synthetic passive result through the real loopback/session/UI boundaries and do not run network collectors:
+
+```bash
+npm ci --ignore-scripts --no-audit --no-fund
+npx --no-install playwright install chromium
+npm run test:browser
+```
+
+The browser matrix covers desktop, tablet, and phone layouts, keyboard/session lifecycle, local-origin enforcement, and automated WCAG A/AA checks. CI also tests Python 3.10, 3.11, and 3.14 and installs the built wheel into a clean environment.

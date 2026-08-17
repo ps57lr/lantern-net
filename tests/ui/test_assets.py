@@ -273,10 +273,17 @@ def test_css_covers_keyboard_mobile_motion_contrast_and_partial_states(
         ".loading-shell",
         ".unsupported-state",
         ".sidebar-session-button",
+        ".assessment-facts",
+        ".issue-grid",
+        ".lantern-path",
+        "grid-template-columns: repeat(5, minmax(0, 1fr))",
+        ".technical-disclosure",
+        ".path-mark",
     ):
         assert token in css
     assert "outline: none" not in css
     assert "outline: 0" not in css
+    assert ".path-node:not(:last-child)::after" not in css
     base_sidebar_action = css.split("@media (max-width: 860px)", 1)[0].split(
         ".sidebar-session-button", 1
     )[1]
@@ -284,6 +291,16 @@ def test_css_covers_keyboard_mobile_motion_contrast_and_partial_states(
     assert "display: none" in base_sidebar_action.split("}", 1)[0]
     assert ".sidebar-session-button" in narrow
     assert "display: inline-flex" in narrow.split(".sidebar-session-button", 1)[1].split("}", 1)[0]
+    tablet = css.split("@media (max-width: 1040px)", 1)[1].split("@media (max-width: 860px)", 1)[0]
+    tablet_path = tablet.split(".lantern-path", 1)[1].split("}", 1)[0]
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in tablet_path
+    assert "overflow" not in tablet_path
+    assert "scroll-snap" not in tablet
+    phone = css.split("@media (max-width: 599px)", 1)[1].split(
+        "@media (prefers-color-scheme: dark)", 1
+    )[0]
+    assert ".lantern-path" in phone
+    assert "grid-template-columns: 1fr" in phone.split(".lantern-path", 1)[1].split("}", 1)[0]
 
 
 def test_light_palette_status_pairs_meet_wcag_aa(source_text: dict[str, str]) -> None:

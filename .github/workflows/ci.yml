@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.14"]
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install project test dependencies
+        run: python -m pip install --disable-pip-version-check --no-input -e ".[dev]"
+      - name: Run tests
+        run: python -m pytest
+      - name: Check source and formatting
+        if: matrix.python-version == '3.11'
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+          git diff --check
+
+  wheel:
+    name: Build and inspect wheel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Install the declared build backend
+        run: python -m pip install --disable-pip-version-check --no-input "setuptools==80.9.0"
+      - name: Build without resolving runtime dependencies
+        run: python -m pip wheel --disable-pip-version-check --no-input --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/lantern-wheels" .
+      - name: Install and verify the isolated wheel
+        run: |
+          wheel_path="$(find "$RUNNER_TEMP/lantern-wheels" -maxdepth 1 -type f -name 'netdiag-*.whl' -print -quit)"
+          test -n "$wheel_path"
+          python -m venv "$RUNNER_TEMP/lantern-wheel-smoke"
+          "$RUNNER_TEMP/lantern-wheel-smoke/bin/python" -m pip install --disable-pip-version-check --no-input --no-index --no-deps "$wheel_path"
+          "$RUNNER_TEMP/lantern-wheel-smoke/bin/netdiag" --version
+          "$RUNNER_TEMP/lantern-wheel-smoke/bin/netdiag" ui --help
+          "$RUNNER_TEMP/lantern-wheel-smoke/bin/python" - <<'PY'
+          import json
+          from importlib.resources import files
+
+          from netdiag.ui.assets import verify_asset_manifest
+
+          verify_asset_manifest()
+          schema = files("netdiag.schemas").joinpath("report-1.1.schema.json")
+          assert json.loads(schema.read_text(encoding="utf-8"))["$schema"].endswith("2020-12/schema")
+          PY
+
+  browser:
+    name: Synthetic local browser acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Select Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
+      - name: Select Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install Lantern without diagnostic side effects
+        run: python -m pip install --disable-pip-version-check --no-input --no-deps -e .
+      - name: Install locked browser-test dependencies without package scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install only the reviewed browser engine
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Exercise the synthetic loopback-only first-run flow
+        env:
+          LANTERN_PYTHON: python
+          PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/lantern-browser-results
+        run: npm run test:browser

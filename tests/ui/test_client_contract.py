@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -133,6 +134,7 @@ def test_clearing_a_session_removes_stale_run_announcements(client: str) -> None
     )
     assert 'runAnnouncement.textContent = ""' in clear
     assert clear.index('runAnnouncement.textContent = ""') < clear.index("renderCurrentView()")
+    assert clear.index("sessionCleared = true") < clear.index("renderCurrentView()")
     expiry = client.split("function armSessionExpiry", 1)[1].split("function clearSession", 1)[0]
     revoke = client.split("async function revokeSession", 1)[1].split(
         "document.addEventListener", 1
@@ -151,6 +153,7 @@ let revokeInFlight = true;
 let pollInFlight = true;
 let authenticated = true;
 let csrfToken = "token";
+let sessionCleared = false;
 let statusSnapshot = {state: "completed"};
 let rendered = 0;
 let noticeMessage = "";
@@ -182,6 +185,7 @@ function reset(announcement) {
   pollInFlight = true;
   authenticated = true;
   csrfToken = "token";
+  sessionCleared = false;
   statusSnapshot = {state: "completed"};
   newCheckButton.disabled = false;
   endSessionButton.disabled = false;
@@ -195,7 +199,8 @@ function reset(announcement) {
 }
 function assertClosed(expectedMessage, expectedTone) {
   if (runAnnouncement.textContent !== "" || authenticated || csrfToken !== null ||
-      statusSnapshot !== null || connectionState.textContent !== "Local session closed" ||
+      !sessionCleared || statusSnapshot !== null ||
+      connectionState.textContent !== "Local session closed" ||
       !newCheckButton.disabled || !endSessionButton.disabled ||
       !mobileEndSessionButton.disabled || !cancelButton.disabled ||
       startInFlight || cancelInFlight || revokeInFlight || pollInFlight || rendered !== 1 ||
@@ -226,6 +231,151 @@ process.stdout.write("ok");
     result = subprocess.run(
         [node, "-"],
         input='"use strict";\n' + harness + clear + checks,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_cleared_expired_and_auth_lost_views_create_no_new_requests(client: str) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+
+    create_element = (
+        "function createElement"
+        + client.split("function createElement", 1)[1].split("function createIcon", 1)[0]
+    )
+    unavailable = (
+        "function renderStatusUnavailable"
+        + client.split("function renderStatusUnavailable", 1)[1].split(
+            "function assessmentPanel", 1
+        )[0]
+    )
+    renderer = (
+        "function renderCurrentView"
+        + client.split("function renderCurrentView", 1)[1].split("function setView", 1)[0]
+    )
+    clear = (
+        "function clearSession"
+        + client.split("function clearSession", 1)[1].split(
+            "function setSessionActionsDisabled", 1
+        )[0]
+    )
+    assert renderer.index("if (unavailable)") < renderer.index('currentView === "overview"')
+    assert "createIcon" not in unavailable
+
+    harness = r"""
+class TestNode {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this._text = "";
+  }
+  append(...items) { this.children.push(...items.filter((item) => item != null)); }
+  set textContent(value) { this._text = String(value); this.children = []; }
+  get textContent() { return this._text + this.children.map((item) => item.textContent).join(""); }
+  focus() {}
+}
+let resourceRequests = 0;
+let apiRequests = 0;
+const window = {fetch() { apiRequests += 1; throw new Error("fetch after clear"); }};
+const document = {
+  activeElement: new TestNode("body"),
+  createElement(tag) { return new TestNode(tag); },
+  createElementNS() { resourceRequests += 1; throw new Error("asset reference after clear"); },
+  getElementById() { return null; },
+};
+const PAGE_META = {overview: {eyebrow: "Diagnosis", title: "Overview", description: "Overview."},
+                   wifi: {eyebrow: "Network module", title: "Wi-Fi", description: "Wi-Fi."}};
+const MODULE_IDS = ["route", "wifi", "dns", "lan", "mdns", "ports"];
+let currentView = "wifi";
+let sessionGeneration = 9;
+let startInFlight = true;
+let cancelInFlight = true;
+let revokeInFlight = true;
+let pollInFlight = true;
+let authenticated = true;
+let csrfToken = "token";
+let sessionCleared = false;
+let statusSnapshot = {state: "completed"};
+const pageEyebrow = {textContent: ""};
+const pageTitle = {textContent: ""};
+const pageDescription = {textContent: ""};
+const pageContent = {
+  last: null,
+  contains() { return false; },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+  replaceChildren(value) { this.last = value; },
+};
+const mobileDrawerQuery = {matches: false};
+const primarySidebar = {classList: {contains() { return false; }}};
+const newCheckButton = {disabled: false};
+const endSessionButton = {disabled: false};
+const mobileEndSessionButton = {disabled: false};
+const cancelButton = {disabled: false};
+const connectionState = {textContent: "Private local session"};
+const runAnnouncement = {textContent: "old run copy"};
+function stopSessionExpiryTimer() {}
+function stopPolling() {}
+function setSessionActionsDisabled(disabled) {
+  endSessionButton.disabled = disabled;
+  mobileEndSessionButton.disabled = disabled;
+}
+function showNotice() {}
+function closeSidebar() { throw new Error("desktop clear moved drawer focus"); }
+function renderProgress() {}
+function unexpectedRenderer() { throw new Error("authenticated renderer ran after clear"); }
+const renderOverview = unexpectedRenderer;
+const renderDevice = unexpectedRenderer;
+const renderNetwork = unexpectedRenderer;
+const renderModule = unexpectedRenderer;
+const renderFixes = unexpectedRenderer;
+const renderRescue = unexpectedRenderer;
+const renderSession = unexpectedRenderer;
+const renderShare = unexpectedRenderer;
+
+function reset() {
+  authenticated = true;
+  csrfToken = "token";
+  sessionCleared = false;
+  statusSnapshot = {state: "completed"};
+  runAnnouncement.textContent = "old run copy";
+  pageContent.last = null;
+}
+function assertRequestFreeClosedView() {
+  if (resourceRequests !== 0 || apiRequests !== 0 || !sessionCleared || authenticated ||
+      statusSnapshot !== null || runAnnouncement.textContent !== "" ||
+      pageTitle.textContent !== "Local session closed" || !pageContent.last ||
+      !pageContent.last.textContent.includes("Lantern is disconnected") ||
+      !pageContent.last.textContent.includes("Launch Lantern again")) {
+    throw new Error("closed view was not request-free and self-contained");
+  }
+}
+"""
+    checks = r"""
+for (const message of [
+  "The private local session ended. Launch Lantern again to reconnect.",
+  "The private local session expired. Launch Lantern again to continue.",
+  "The private local session expired. Launch Lantern again to continue.",
+]) {
+  reset();
+  clearSession(message, message.includes("ended") ? "info" : "attention");
+  assertRequestFreeClosedView();
+}
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        [node, "-"],
+        input=(
+            '"use strict";\n' + harness + create_element + unavailable + renderer + clear + checks
+        ),
         check=False,
         capture_output=True,
         text=True,
@@ -563,7 +713,8 @@ async function apiFetch() { return await activeRequest.promise; }
 async function readJson() {
   readCalls += 1;
   if (bodyPending) return await statusBody.promise;
-  return {state: "ready"};
+  return {state: "ready", assessment: {sentence: "stale diagnosis"},
+          path: [{id: "device", detail: "stale path"}]};
 }
 async function failureMessage() { return "stale failure"; }
 function validateStatus(value) { return value; }
@@ -610,7 +761,8 @@ async function bodyInvalidation(label) {
   for (let turn = 0; turn < 5 && readCalls === 0; turn += 1) await Promise.resolve();
   if (readCalls !== 1) throw new Error("status did not reach deferred body");
   clearSession(label);
-  statusBody.resolve({state: "ready"});
+  statusBody.resolve({state: "ready", assessment: {sentence: "stale diagnosis"},
+                      path: [{id: "device", detail: "stale path"}]});
   await pending;
   if (authenticated || statusSnapshot !== null || readCalls !== 1 || viewMutations !== 0 ||
       connectionState.textContent !== "Local session closed" || closedCopy !== label) {
@@ -1346,9 +1498,12 @@ def test_consent_copy_names_real_packets_and_mdns_is_separate_opt_in(client: str
 
 
 def test_status_contract_is_exact_bounded_ordered_and_fail_closed(client: str) -> None:
-    assert 'value.schema !== "lantern.ui.v1"' in client
+    assert 'value.schema !== "lantern.ui.v2"' in client
     assert 'value.transport !== "loopback"' in client
     assert 'Object.freeze(["route", "wifi", "dns", "lan", "mdns", "ports"])' in client
+    for path_id in ("device", "gateway", "internet", "dns", "services"):
+        assert f'id: "{path_id}"' in client
+    assert 'id: "device", label: "Device route"' in client
     for status in (
         "not_started",
         "queued",
@@ -1364,11 +1519,31 @@ def test_status_contract_is_exact_bounded_ordered_and_fail_closed(client: str) -
     assert 'ok: "Completed"' in client
     assert 'ok: "Healthy"' not in client
     assert "value.length !== MODULE_IDS.length" in client
-    assert "module.id !== MODULE_IDS[index]" in client
-    assert "boundedText(module.detail, 500" in client
+    assert "module.id !== expectedOrder[index]" in client
+    assert 'validateModules(value.modules, run ? run.goal : "problem")' in client
+    assert 'requiredSafeText(module.detail, 500, "module detail")' in client
+    assert 'requiredSafeText(module.finding, 180, "module finding")' in client
+    assert "module.technical.length > 4" in client
+    assert "value.length > 3" in client
+    assert "codes.has(issue.code)" in client
+    assert "value.length !== PATH_SPECS.length" in client
+    assert "node.id !== spec.id" in client
+    assert "node.label !== spec.label" in client
+    assert "node.module !== spec.module" in client
+    assert 'requiredSafeText(node.detail, 200, "path detail")' in client
+    assert 'requiredSafeText(value.sentence, 240, "assessment sentence")' in client
+    assert 'requiredSafeText(value.disclaimer, 300, "assessment disclaimer")' in client
+    assert "assessment.tone !== summary.tone" in client
+    assert 'value.state === "completed" && assessment.tone === "neutral"' in client
+    assert '(value.coverage === "none") !== (value.confidence === "none")' in client
+    assert 'value.coverage === "partial" && value.confidence !== "low"' in client
+    assert 'state === "ready" || state === "running" || state === "failed"' in client
+    assert "disclaimer !== NETWORK_DISCLAIMER" in client
+    assert "not a whole-network assessment, security audit, or compliance certification" in client
     assert "boundedInteger(value.percent, 0, 100)" in client
     assert 'value.profile === "passive" && value.include_mdns' in client
     assert '(value.state === "ready") !== (run === null)' in client
+    assert 'value.state === "cancelled" && run.cancel_requested !== true' in client
     assert "Math.round(value.processed * 100 / value.planned)" in client
     assert "value.percent !== expectedPercent" in client
 
@@ -1386,17 +1561,25 @@ def test_status_validator_runtime_canaries_fail_closed(client: str) -> None:
         + client.split("function boundedText", 1)[1].split("async function apiFetch", 1)[0]
     )
     harness = r"""
+const networkBoundary = "This is an informational evaluation from one endpoint, not a whole-network assessment, security audit, or compliance certification for a home, business, financial system, or municipality.";
 const base = {
-  schema: "lantern.ui.v1",
+  schema: "lantern.ui.v2",
   product: "Lantern",
   transport: "loopback",
   state: "completed",
-  summary: {tone: "neutral", headline: "Complete", detail: "Bounded result."},
+  summary: {tone: "attention", headline: "Complete", detail: "Bounded result."},
+  assessment: {sentence: "Lantern completed a bounded network assessment.", tone: "attention",
+               confidence: "medium", coverage: "complete", disclaimer: networkBoundary},
+  issues: [],
+  path: PATH_SPECS.map((item) => ({id: item.id, label: item.label, status: "ok",
+                                  detail: "This path stage completed.", module: item.module})),
   run: {goal: "network", profile: "passive", include_mdns: false,
         cancel_requested: false, duration_ms: 1},
   progress: {processed: 2, planned: 2, percent: 100},
-  modules: MODULE_IDS.map((id) => ({id: id, label: PAGE_META[id].title,
-                                    status: "ok", detail: "Complete."})),
+  modules: GOAL_MODULE_ORDER.network.map((id) => ({id: id, label: PAGE_META[id].title,
+                                    status: "ok", detail: "Complete.",
+                                    finding: "No issue was reported by this module.",
+                                    technical: ["The bounded module reached a terminal state."]})),
   capabilities: {passive_scan: true, low_impact_network: true,
                  active_discovery: false, remediation: false, credentials: false,
                  lan_remote: false, rescue_boot: false, share_export: false},
@@ -1410,17 +1593,540 @@ function mustReject(change) {
   if (!rejected) { throw new Error("validator accepted a contract canary"); }
 }
 validateStatus(copy());
+mustReject((value) => { value.summary.tone = "neutral"; value.assessment.tone = "neutral"; });
 mustReject((value) => { value.run.include_mdns = true; });
 mustReject((value) => { value.state = "ready"; });
+mustReject((value) => { value.state = "cancelled"; });
+mustReject((value) => { value.state = "failed"; });
 mustReject((value) => { value.run = null; });
 mustReject((value) => { value.progress.percent = 99; });
+mustReject((value) => { value.progress.processed = true; });
 mustReject((value) => { value.capabilities.remediation = true; });
 mustReject((value) => { value.modules.reverse(); });
+mustReject((value) => { value.extra = true; });
+mustReject((value) => { value.assessment.tone = "positive"; });
+mustReject((value) => { value.assessment.coverage = "partial"; });
+mustReject((value) => { value.assessment.coverage = "none"; });
+mustReject((value) => { value.assessment.confidence = "none"; });
+mustReject((value) => { value.assessment.sentence = "x".repeat(241); });
+mustReject((value) => { value.assessment.disclaimer = "Informational only."; });
+mustReject((value) => { value.summary.tone = "positive"; value.assessment.tone = "positive";
+  value.modules[0].status = "limited"; });
+mustReject((value) => { value.summary.tone = "neutral"; value.assessment.tone = "neutral";
+  value.path[0].status = "attention"; });
+mustReject((value) => { value.summary.tone = "neutral"; value.assessment.tone = "neutral";
+  value.modules[0].status = "attention"; });
+mustReject((value) => { value.path.reverse(); });
+mustReject((value) => { value.path[1].id = "device"; });
+mustReject((value) => { value.path[0].module = "wifi"; });
+mustReject((value) => { value.path[0].status = "healthy"; });
+mustReject((value) => { value.path[0].detail = "x".repeat(201); });
+mustReject((value) => { value.path[0].extra = "unsafe"; });
+mustReject((value) => { value.modules[0].finding = "x".repeat(181); });
+mustReject((value) => { value.modules[0].technical = ["a", "b", "c", "d", "e"]; });
+mustReject((value) => { value.modules[0].technical = [true]; });
+mustReject((value) => { value.modules[0].extra = "unsafe"; });
+mustReject((value) => { value.state = "running"; value.summary.tone = "neutral";
+  value.assessment.tone = "neutral"; value.modules.forEach((item) => { item.status = "queued"; });
+  value.path.forEach((item) => { item.status = "not_run"; });
+  value.progress = {processed: 0, planned: 0, percent: 0}; });
+mustReject((value) => { value.state = "cancelled"; value.summary.tone = "attention";
+  value.assessment.tone = "attention"; });
+mustReject((value) => { value.issues = [0, 1, 2, 3].map((index) => ({
+  code: "NDG.ROUTE.CHECK_" + String(index), title: "Review route", explanation: "Review.",
+  next_step: "Recheck the route.", module: "route", severity: "attention"})); });
+mustReject((value) => { value.issues = [
+  {code: "NDG.ROUTE.CHECK_FAILED", title: "Review route", explanation: "Review.",
+   next_step: "Recheck the route.", module: "route", severity: "attention"},
+  {code: "NDG.ROUTE.CHECK_FAILED", title: "Review route again", explanation: "Review.",
+   next_step: "Recheck the route.", module: "route", severity: "attention"},
+]; });
+mustReject((value) => { value.issues = [{code: "unknown", title: "Review route",
+  explanation: "Review.", next_step: "Recheck the route.", module: "route",
+  severity: "attention"}]; });
+mustReject((value) => { value.issues = [{code: "NDG.ROUTE.NOT_REGISTERED", title: "Review route",
+  explanation: "Review.", next_step: "Recheck the route.", module: "route",
+  severity: "attention"}]; });
+mustReject((value) => { value.issues = [{code: "NDG.LAN.ACTIVE_DISCOVERY_NO_SCOPE",
+  title: "Review LAN", explanation: "Review.", next_step: "Recheck the LAN.", module: "lan",
+  severity: "attention"}]; });
+mustReject((value) => { value.issues = [{code: "NDG.DNS.RESOLUTION_FAILED", title: "Review DNS",
+  explanation: "Review.", next_step: "Recheck name lookup.", module: "wifi",
+  severity: "attention"}]; });
+mustReject((value) => { value.issues = [{code: "NDG.ROUTE.OUTBOUND_HTTPS_FAILED",
+  title: "Review route", explanation: "Review.", next_step: "Recheck the route.",
+  module: "route", severity: "critical"}]; value.summary.tone = "attention";
+  value.assessment.tone = "attention"; });
+mustReject((value) => { value.issues = [{code: "NDG.DNS.RESOLUTION_FAILED",
+  title: "Review DNS", explanation: "Review.", next_step: "Recheck name lookup.",
+  module: "dns", severity: "critical"}]; value.summary.tone = "attention";
+  value.assessment.tone = "attention"; });
+mustReject((value) => { value.issues = [{code: "NDG.ROUTE.CHECK_FAILED", title: "Review route",
+  explanation: "Review.", next_step: true, module: "route", severity: "attention"}]; });
 process.stdout.write("ok");
 """
     result = subprocess.run(
         [node, "-"],
         input='"use strict";\n' + declarations + validators + harness,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_synthetic_healthy_and_real_limited_offline_cancelled_failed_fixtures_validate(
+    client: str,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    declarations = (
+        "const MODULE_IDS" + client.split("const MODULE_IDS", 1)[1].split("let csrfToken", 1)[0]
+    )
+    validators = (
+        "function boundedText"
+        + client.split("function boundedText", 1)[1].split("async function apiFetch", 1)[0]
+    )
+    harness = r"""
+const networkBoundary = "This is an informational evaluation from one endpoint, not a whole-network assessment, security audit, or compliance certification for a home, business, financial system, or municipality.";
+function fixture() {
+  return {
+    schema: "lantern.ui.v2", product: "Lantern", transport: "loopback",
+    state: "completed",
+    summary: {tone: "attention", headline: "The bounded observations completed",
+              detail: "No adverse observation was reported, but one planned check cannot run in this profile."},
+    assessment: {sentence: "No adverse observation was reported, but planned coverage is incomplete.",
+                 tone: "attention", confidence: "low", coverage: "partial",
+                 disclaimer: networkBoundary},
+    issues: [],
+    path: PATH_SPECS.map((item) => ({id: item.id, label: item.label, status: "ok",
+                                    detail: "No issue was reported for this layer.",
+                                    module: item.module})),
+    run: {goal: "network", profile: "low_impact_network", include_mdns: true,
+          cancel_requested: false, duration_ms: 50},
+    progress: {processed: 8, planned: 8, percent: 100},
+    modules: GOAL_MODULE_ORDER.network.map((id) => ({id: id, label: PAGE_META[id].title,
+      status: id === "lan" ? "limited" : "ok",
+      detail: "The bounded module completed.",
+      finding: id === "lan" ? "Passive LAN observations completed; active discovery did not run."
+                            : "No issue was reported by this module.",
+      technical: ["The module reached a terminal state within the authorized profile."]})),
+    capabilities: {passive_scan: true, low_impact_network: true, active_discovery: false,
+      remediation: false, credentials: false, lan_remote: false, rescue_boot: false,
+      share_export: false},
+  };
+}
+function issue(code, module, severity) {
+  return {code: code, title: "A bounded check needs review",
+          explanation: "Lantern could not confirm this diagnostic layer.",
+          next_step: "Repeat the bounded check before changing settings.",
+          module: module, severity: severity};
+}
+const fixtures = [];
+// Phase 2.1's positive healthy branch is presentation-only synthetic coverage.
+// Current live profiles cannot produce it because active LAN stays not_run.
+const healthy = fixture();
+healthy.summary.tone = "positive";
+healthy.summary.headline = "Synthetic planned coverage completed";
+healthy.summary.detail = "Synthetic presentation data reported no issue.";
+healthy.assessment.tone = "positive";
+healthy.assessment.coverage = "complete";
+healthy.assessment.confidence = "high";
+healthy.assessment.sentence = "Synthetic presentation data reported no issue across every layer.";
+healthy.modules.find((item) => item.id === "lan").status = "ok";
+healthy.modules.find((item) => item.id === "lan").finding = "Synthetic presentation data reported no LAN issue.";
+if (healthy.assessment.tone !== "positive" || healthy.assessment.coverage !== "complete" ||
+    healthy.modules.some((item) => item.status !== "ok")) {
+  throw new Error("synthetic positive branch fixture is incomplete");
+}
+fixtures.push(["synthetic_healthy", healthy]);
+
+// This is the ideal reachable live projection: no adverse observation, but
+// necessarily partial/limited coverage and no whole-run health claim.
+const noAdverseLive = fixture();
+if (noAdverseLive.assessment.tone !== "attention" ||
+    noAdverseLive.assessment.coverage !== "partial" ||
+    noAdverseLive.modules.find((item) => item.id === "lan").status !== "limited") {
+  throw new Error("live no-adverse fixture overstated real scanner coverage");
+}
+fixtures.push(["no_adverse_live", noAdverseLive]);
+
+const limited = fixture();
+limited.summary.tone = "attention";
+limited.assessment.tone = "attention";
+limited.assessment.sentence = "Part of the planned diagnostic coverage is limited.";
+limited.assessment.confidence = "low";
+limited.assessment.coverage = "partial";
+limited.path[2].status = "limited";
+limited.path[2].detail = "Internet-path evidence is incomplete.";
+limited.modules[0].status = "limited";
+limited.modules[0].finding = "Part of this module was not included.";
+limited.issues = [issue("NDG.ROUTE.EXTERNAL_ICMP_UNANSWERED_PATH_UNCONFIRMED", "route", "attention")];
+fixtures.push(["limited", limited]);
+
+const offline = fixture();
+offline.summary.tone = "critical";
+offline.assessment.tone = "critical";
+offline.assessment.sentence = "The internet path could not be confirmed from this endpoint.";
+offline.assessment.confidence = "low";
+offline.path[1].status = "unavailable";
+offline.path[2].status = "unavailable";
+offline.path[1].detail = "The gateway layer is unavailable.";
+offline.path[2].detail = "The internet layer is unavailable.";
+offline.modules[0].status = "unavailable";
+offline.modules[0].finding = "The connection path could not be confirmed.";
+offline.issues = [issue("NDG.ROUTE.OUTBOUND_HTTPS_FAILED", "route", "attention")];
+fixtures.push(["offline", offline]);
+
+const cancelled = fixture();
+cancelled.state = "cancelled";
+cancelled.summary.tone = "attention";
+cancelled.summary.headline = "The check was cancelled";
+cancelled.assessment.tone = "attention";
+cancelled.assessment.sentence = "The cancelled run does not support a complete assessment.";
+cancelled.assessment.confidence = "low";
+cancelled.assessment.coverage = "partial";
+cancelled.run.cancel_requested = true;
+cancelled.progress = {processed: 8, planned: 8, percent: 100};
+cancelled.path.forEach((item) => { item.status = "not_run"; item.detail = "Not checked before cancellation."; });
+cancelled.modules.forEach((item) => { item.status = "cancelled"; item.finding = "This module was cancelled."; });
+fixtures.push(["cancelled", cancelled]);
+
+const failed = fixture();
+failed.state = "failed";
+failed.summary.tone = "attention";
+failed.summary.headline = "The diagnostic could not complete";
+failed.assessment.tone = "attention";
+failed.assessment.sentence = "The failed run cannot support a network conclusion.";
+failed.assessment.confidence = "none";
+failed.assessment.coverage = "none";
+failed.progress = {processed: 0, planned: 0, percent: 0};
+failed.path.forEach((item) => { item.status = "unavailable"; item.detail = "No safe layer status is available."; });
+failed.modules.forEach((item) => { item.status = "unavailable"; item.finding = "No safe finding is available."; });
+fixtures.push(["failed", failed]);
+
+for (const [name, value] of fixtures) {
+  try { validateStatus(value); } catch (error) {
+    throw new Error(name + " fixture was rejected: " + String(error));
+  }
+}
+process.stdout.write(fixtures.map((item) => item[0]).join(","));
+"""
+    result = subprocess.run(
+        [node, "-"],
+        input='"use strict";\n' + declarations + validators + harness,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ("synthetic_healthy,no_adverse_live,limited,offline,cancelled,failed")
+
+
+def test_python_v2_lifecycle_snapshots_match_the_javascript_validator(client: str) -> None:
+    from netdiag.ui.viewmodel import build_ui_viewmodel, ready_ui_viewmodel
+    from tests.ui.test_viewmodel import ideal_low_impact_snapshot
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    ideal_live = build_ui_viewmodel(ideal_low_impact_snapshot(goal="network"))
+    assert ideal_live["assessment"]["tone"] == "attention"
+    assert ideal_live["assessment"]["coverage"] == "partial"
+    assert next(item for item in ideal_live["modules"] if item["id"] == "lan")["status"] == (
+        "limited"
+    )
+    views = [ready_ui_viewmodel(), ideal_live]
+    profiles = (
+        ("passive", False),
+        ("low_impact_network", False),
+        ("low_impact_network", True),
+    )
+    for state in ("running", "failed"):
+        for goal in ("problem", "network", "rescue"):
+            for profile, include_mdns in profiles:
+                views.append(
+                    build_ui_viewmodel(
+                        {
+                            "state": state,
+                            "duration_ms": 3,
+                            "run": {
+                                "goal": goal,
+                                "profile": profile,
+                                "include_mdns": include_mdns,
+                                "cancel_requested": False,
+                            },
+                            "progress": {
+                                "processed": 0,
+                                "planned": 0,
+                                "percent": 0,
+                                "events": [],
+                            },
+                            "result": None,
+                        }
+                    )
+                )
+    declarations = (
+        "const MODULE_IDS" + client.split("const MODULE_IDS", 1)[1].split("let csrfToken", 1)[0]
+    )
+    validators = (
+        "function boundedText"
+        + client.split("function boundedText", 1)[1].split("async function apiFetch", 1)[0]
+    )
+    harness = (
+        "const snapshots = "
+        + json.dumps(views, separators=(",", ":"))
+        + ";\nfor (const snapshot of snapshots) validateStatus(snapshot);\n"
+        + "process.stdout.write(String(snapshots.length));\n"
+    )
+    result = subprocess.run(
+        [node, "-"],
+        input='"use strict";\n' + declarations + validators + harness,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "20"
+
+
+def test_phase21_renderers_use_accessible_landmarks_and_progressive_disclosure(
+    client: str,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    declarations = (
+        "const MODULE_IDS" + client.split("const MODULE_IDS", 1)[1].split("let csrfToken", 1)[0]
+    )
+    renderers = (
+        "function createElement"
+        + client.split("function createElement", 1)[1].split("function unavailablePanel", 1)[0]
+    )
+    harness = r"""
+class TestNode {
+  constructor(tag, text) {
+    this.tagName = tag.toUpperCase();
+    this.children = [];
+    this.attributes = new Map();
+    this.dataset = {};
+    this.className = "";
+    this._text = text || "";
+  }
+  append(...nodes) { for (const node of nodes) if (node !== null && node !== undefined) this.children.push(node); }
+  prepend(...nodes) { this.children.unshift(...nodes); }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name); }
+  get firstElementChild() { return this.children.find((node) => node.tagName !== "#TEXT") || null; }
+  set textContent(value) { this._text = String(value); this.children = []; }
+  get textContent() { return this._text + this.children.map((node) => node.textContent).join(""); }
+}
+const document = {
+  createElement(tag) { return new TestNode(tag); },
+  createElementNS(_namespace, tag) { return new TestNode(tag); },
+  createTextNode(text) { return new TestNode("#text", String(text)); },
+  createDocumentFragment() { return new TestNode("#fragment"); },
+};
+function descendants(node, tag) {
+  const wanted = tag.toUpperCase();
+  const found = [];
+  function visit(item) {
+    if (item.tagName === wanted) found.push(item);
+    item.children.forEach(visit);
+  }
+  visit(node);
+  return found;
+}
+let authenticated = true;
+let startInFlight = false;
+let draftGoal = "problem";
+let draftBasic = false;
+let draftMdns = false;
+const issueCodes = ["NDG.ROUTE.CHECK_FAILED", "NDG.DNS.RESOLVER_INCONSISTENT", "NDG.WIFI.SIGNAL_WEAK"];
+const issueModules = ["route", "dns", "wifi"];
+const statusSnapshot = {
+  state: "completed",
+  summary: {tone: "attention", headline: "Review", detail: "The bounded run found items to review."},
+  assessment: {sentence: "Three priority items need review.", tone: "attention",
+               confidence: "medium", coverage: "partial",
+               disclaimer: "One endpoint cannot certify a wider network."},
+  issues: issueCodes.map((code, index) => ({code: code, title: "Priority item " + String(index + 1),
+    explanation: "This safe explanation contains no identifier.",
+    next_step: "Repeat the bounded module before changing settings.",
+    module: issueModules[index], severity: "attention"})),
+  path: PATH_SPECS.map((spec, index) => ({id: spec.id, label: spec.label,
+    status: index === 2 ? "limited" : "ok", detail: "Bounded layer summary.",
+    module: spec.module})),
+  modules: MODULE_IDS.map((id) => ({id: id, label: PAGE_META[id].title,
+    status: id === "route" ? "attention" : "ok", detail: "Bounded module state.",
+    finding: "Safe finding for " + PAGE_META[id].title + ".",
+    technical: ["Identifier-free technical note one.", "Identifier-free technical note two."]})),
+};
+const assessment = assessmentPanel();
+if (descendants(assessment, "dl").length !== 1 || descendants(assessment, "dt").length !== 2 ||
+    descendants(assessment, "dd").length !== 2 || !assessment.textContent.includes("Confidence") ||
+    !assessment.textContent.includes("Coverage")) {
+  throw new Error("assessment metadata is not semantic");
+}
+const priority = renderPriorityIssues();
+const articles = descendants(priority, "article");
+if (articles.length !== 3 || articles.some((item) =>
+    descendants(item, "strong").filter((part) => part.textContent === "Safe next step").length !== 1)) {
+  throw new Error("priority issues do not have one safe next step each");
+}
+if (issueCodes.some((code) => priority.textContent.includes(code))) {
+  throw new Error("renderer exposed internal finding codes");
+}
+const path = renderLanternPath();
+const ordered = descendants(path, "ol");
+if (ordered.length !== 1 || descendants(path, "li").length !== 5 ||
+    ordered[0].getAttribute("aria-label") !== "Lantern Path diagnostic-layer map" ||
+    !path.textContent.includes("not a network topology")) {
+  throw new Error("Lantern Path is not an honest accessible ordered map");
+}
+const module = renderModule("route");
+if (descendants(module, "details").length !== 1 || descendants(module, "summary").length !== 1 ||
+    !module.textContent.includes("Safe finding summary") ||
+    !module.textContent.includes("Identifier-free technical note one.")) {
+  throw new Error("module detail is not progressively disclosed");
+}
+if (descendants(module, "details")[0].id !== "technical-disclosure-route" ||
+    descendants(module, "summary")[0].id !== "technical-summary-route") {
+  throw new Error("technical disclosure has no stable focus identity");
+}
+const consent = renderStartPanel();
+if (!consent.textContent.includes(
+    "Run network checks only on a network you own, manage, or are explicitly authorized to assess.")) {
+  throw new Error("network assessment authorization boundary was not rendered");
+}
+
+// Synthetic presentation-only coverage for the positive rendering branch.
+// Current live profiles cannot produce this all-ok state.
+statusSnapshot.assessment.tone = "positive";
+statusSnapshot.assessment.coverage = "complete";
+statusSnapshot.assessment.sentence = "Synthetic presentation data reported no issue.";
+statusSnapshot.issues.splice(0);
+statusSnapshot.path.forEach((item) => { item.status = "ok"; });
+statusSnapshot.modules.forEach((item) => { item.status = "ok"; });
+const syntheticAssessment = assessmentPanel();
+const syntheticPriority = renderPriorityIssues();
+const syntheticIcons = descendants(syntheticAssessment, "use").map((item) => item.getAttribute("href"));
+if (!syntheticAssessment.className.includes("tone-positive") ||
+    !syntheticIcons.includes("icons.svg#shield-check") ||
+    !syntheticPriority.textContent.includes("No priority issue was returned from the completed plan")) {
+  throw new Error("synthetic positive presentation branch was not rendered");
+}
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        [node, "-"],
+        input='"use strict";\n' + declarations + renderers + harness,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "ok"
+
+
+def test_goal_changes_priority_emphasis_only_and_never_scan_scope(client: str) -> None:
+    assert "Priority emphasis:" in client
+    assert "Presentation order:" not in client
+    assert (
+        "priority emphasis, module presentation order, and priority-issue ordering only" in client
+    )
+    assert "It never changes the diagnostic profile, packet activity, or scan scope." in client
+    assert "from one endpoint" in client
+    assert "not a whole-network assessment, security audit, or compliance certification" in client
+    assert "home, business, financial system, or municipality" in client
+    assert (
+        "Run network checks only on a network you own, manage, or are explicitly authorized to assess."
+        in client
+    )
+    assert 'emphasisCopy.setAttribute("aria-live", "polite")' in client
+    assert 'emphasis.setAttribute("aria-live", "polite")' not in client
+    change = client.split('target.name === "goal"', 1)[1].split(
+        '} else if (target.id === "basic-network-checks")', 1
+    )[0]
+    assert "draftGoal = target.value" in change
+    assert "goalEmphasisText(draftGoal)" in change
+    start = client.split("async function startCheck", 1)[1].split("async function cancelCheck", 1)[
+        0
+    ]
+    assert start.count("draftGoal") == 1
+    assert (
+        "const requestBody = { goal: draftGoal, profile: profile, include_mdns: includeMdns }"
+        in start
+    )
+
+
+def test_running_rerender_preserves_technical_disclosure_and_summary_focus(
+    client: str,
+) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    renderer = (
+        "function renderCurrentView"
+        + client.split("function renderCurrentView", 1)[1].split("function setView", 1)[0]
+    )
+    harness = r"""
+const MODULE_IDS = ["route", "wifi", "dns", "lan", "mdns", "ports"];
+const PAGE_META = {route: {eyebrow: "Network module", title: "Route", description: "Route."},
+                   overview: {eyebrow: "Diagnosis", title: "Overview", description: "Overview."}};
+let currentView = "route";
+let statusSnapshot = {state: "running"};
+let sessionCleared = false;
+const pageEyebrow = {textContent: ""};
+const pageTitle = {textContent: ""};
+const pageDescription = {textContent: ""};
+let focusCalls = 0;
+const active = {id: "technical-summary-route", dataset: {}, name: "", focus() {}};
+const replacementSummary = {focus() { focusCalls += 1; }};
+const replacementDisclosure = {open: false};
+const document = {
+  activeElement: active,
+  getElementById(id) {
+    if (id === "technical-summary-route") return replacementSummary;
+    if (id === "technical-disclosure-route") return replacementDisclosure;
+    return null;
+  },
+};
+let replaced = 0;
+const pageContent = {
+  contains(node) { return node === active; },
+  querySelector(selector) {
+    return selector === "details.technical-disclosure[open]"
+      ? {id: "technical-disclosure-route"} : null;
+  },
+  querySelectorAll() { return []; },
+  replaceChildren() { replaced += 1; },
+};
+function renderProgress() {}
+function renderStatusUnavailable() { throw new Error("running view used closed renderer"); }
+function renderOverview() { return {}; }
+function renderDevice() { return {}; }
+function renderNetwork() { return {}; }
+function renderModule() { return {}; }
+function renderFixes() { return {}; }
+function renderRescue() { return {}; }
+function renderSession() { return {}; }
+function renderShare() { return {}; }
+renderCurrentView();
+if (replaced !== 1 || !replacementDisclosure.open || focusCalls !== 1) {
+  throw new Error("running rerender dropped disclosure state or focus");
+}
+process.stdout.write("ok");
+"""
+    result = subprocess.run(
+        [node, "-"],
+        input='"use strict";\n' + harness + renderer,
         check=False,
         capture_output=True,
         text=True,
@@ -1462,6 +2168,8 @@ def test_polling_runs_only_during_a_run_and_preserves_dynamic_focus(client: str)
     assert "document.activeElement" in rendering
     assert "focusModule" in rendering
     assert "focusGoal" in rendering
+    assert 'pageContent.querySelector("details.technical-disclosure[open]")' in rendering
+    assert "replacementDisclosure.open = true" in rendering
     assert "replacement.focus()" in rendering
 
 

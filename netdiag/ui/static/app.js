@@ -28,10 +28,50 @@
     mdns: "mdns",
     ports: "ports",
   });
+  const PATH_SPECS = Object.freeze([
+    Object.freeze({ id: "device", label: "Device route", icon: "device", module: "route" }),
+    Object.freeze({ id: "gateway", label: "Gateway", icon: "gateway", module: "route" }),
+    Object.freeze({ id: "internet", label: "Internet", icon: "globe", module: "route" }),
+    Object.freeze({ id: "dns", label: "DNS", icon: "dns", module: "dns" }),
+    Object.freeze({ id: "services", label: "Local services", icon: "mdns", module: "mdns" }),
+  ]);
   const STATES = new Set(["ready", "running", "completed", "cancelled", "failed"]);
   const GOALS = new Set(["problem", "network", "rescue"]);
   const PROFILES = new Set(["passive", "low_impact_network"]);
   const SUMMARY_TONES = new Set(["neutral", "positive", "attention", "critical"]);
+  const CONFIDENCE_LEVELS = new Set(["high", "medium", "low", "none"]);
+  const COVERAGE_LEVELS = new Set(["complete", "partial", "none"]);
+  const PATH_STATUSES = new Set(["ok", "attention", "limited", "not_run", "unavailable"]);
+  const ISSUE_SEVERITIES = new Set(["attention", "critical"]);
+  const ISSUE_CODE_MODULE = Object.freeze({
+    "NDG.ROUTE.DEFAULT_ROUTE_MISSING": "route",
+    "NDG.ROUTE.OUTBOUND_HTTPS_FAILED": "route",
+    "NDG.ROUTE.GATEWAY_ICMP_UNANSWERED_PATH_UNCONFIRMED": "route",
+    "NDG.ROUTE.EXTERNAL_ICMP_UNANSWERED_PATH_UNCONFIRMED": "route",
+    "NDG.ROUTE.CHECK_FAILED": "route",
+    "NDG.DNS.FILTERING_DETECTED": "dns",
+    "NDG.DNS.RESOLVER_INCONSISTENT": "dns",
+    "NDG.DNS.RESOLUTION_FAILED": "dns",
+    "NDG.DNS.NO_RESOLVERS_CONFIGURED": "dns",
+    "NDG.DNS.CHECK_FAILED": "dns",
+    "NDG.WIFI.UNSUPPORTED": "wifi",
+    "NDG.WIFI.SIGNAL_WEAK": "wifi",
+    "NDG.WIFI.CHECK_FAILED": "wifi",
+    "NDG.LAN.NEIGHBOR_CACHE_PARTIAL": "lan",
+    "NDG.LAN.NEIGHBOR_CACHE_FAILED": "lan",
+    "NDG.LAN.DUPLICATE_ADDRESS_SUSPECTED": "lan",
+    "NDG.LAN.CHECK_FAILED": "lan",
+    "NDG.MDNS.BROWSE_FAILED": "mdns",
+    "NDG.MDNS.UNSUPPORTED": "mdns",
+    "NDG.MDNS.CHECK_FAILED": "mdns",
+    "NDG.PORTS.TARGET_UNREACHABLE_OR_FILTERED": "ports",
+    "NDG.PORTS.CHECK_FAILED": "ports",
+  });
+  const ISSUE_CODES = new Set(Object.keys(ISSUE_CODE_MODULE));
+  const CRITICAL_ISSUE_CODES = new Set([
+    "NDG.DNS.RESOLUTION_FAILED",
+    "NDG.DNS.NO_RESOLVERS_CONFIGURED",
+  ]);
   const MODULE_STATUSES = new Set([
     "not_started",
     "queued",
@@ -64,6 +104,52 @@
     unavailable: "unknown",
     not_run: "clock",
     cancelled: "clock",
+  });
+  const PATH_STATUS_LABELS = Object.freeze({
+    ok: "No issue reported",
+    attention: "Needs attention",
+    limited: "Partially checked",
+    not_run: "Not checked",
+    unavailable: "Unavailable",
+  });
+  const PATH_STATUS_ICONS = Object.freeze({
+    ok: "check",
+    attention: "alert",
+    limited: "info",
+    not_run: "clock",
+    unavailable: "unknown",
+  });
+  const CONFIDENCE_LABELS = Object.freeze({
+    high: "High confidence",
+    medium: "Medium confidence",
+    low: "Low confidence",
+    none: "Confidence unavailable",
+  });
+  const COVERAGE_LABELS = Object.freeze({
+    complete: "Complete planned coverage",
+    partial: "Partial planned coverage",
+    none: "No diagnostic coverage",
+  });
+  const NETWORK_DISCLAIMER = "This is an informational evaluation from one endpoint, not a whole-network assessment, security audit, or compliance certification for a home, business, financial system, or municipality.";
+  const RESCUE_DISCLAIMER = "This is current-device and network guidance only; it does not determine bootability, storage or hardware health, OS integrity, encryption, backups, or data recoverability, and it does not perform recovery.";
+  const GOAL_MODULE_ORDER = Object.freeze({
+    problem: Object.freeze(["route", "wifi", "dns", "lan", "mdns", "ports"]),
+    network: Object.freeze(["route", "dns", "ports", "lan", "wifi", "mdns"]),
+    rescue: Object.freeze(["route", "wifi", "lan", "dns", "mdns", "ports"]),
+  });
+  const GOAL_EMPHASIS = Object.freeze({
+    problem: Object.freeze({
+      label: "Likely-cause emphasis",
+      priority: "Connection path → Wi-Fi → Name lookup → Nearby devices → Local services → Gateway services",
+    }),
+    network: Object.freeze({
+      label: "Network-path emphasis",
+      priority: "Connection path → Name lookup → Gateway services → Nearby devices → Wi-Fi → Local services",
+    }),
+    rescue: Object.freeze({
+      label: "Recovery-context emphasis",
+      priority: "Connection path → Wi-Fi → Nearby devices → Name lookup → Local services → Gateway services",
+    }),
   });
 
   const PAGE_META = Object.freeze({
@@ -106,6 +192,7 @@
   let startInFlight = false;
   let cancelInFlight = false;
   let revokeInFlight = false;
+  let sessionCleared = false;
   let draftGoal = "problem";
   let draftBasic = false;
   let draftMdns = false;
@@ -141,6 +228,19 @@
       const code = character.codePointAt(0);
       if (code < 32 && character !== "\n" && character !== "\t") {
         return fallback;
+      }
+    }
+    return value;
+  }
+
+  function requiredSafeText(value, maximum, label) {
+    if (typeof value !== "string" || value.length < 1 || value.length > maximum) {
+      throw new Error("Lantern returned invalid " + label + ".");
+    }
+    for (const character of value) {
+      const code = character.codePointAt(0);
+      if (code < 32 && character !== "\n" && character !== "\t") {
+        throw new Error("Lantern returned invalid " + label + ".");
       }
     }
     return value;
@@ -191,8 +291,8 @@
     }
     return Object.freeze({
       tone: value.tone,
-      headline: boundedText(value.headline, 180, "Summary unavailable."),
-      detail: boundedText(value.detail, 600, "Lantern could not safely display the summary detail."),
+      headline: requiredSafeText(value.headline, 180, "status headline"),
+      detail: requiredSafeText(value.detail, 600, "status detail"),
     });
   }
 
@@ -243,22 +343,135 @@
     return Object.freeze({ processed: value.processed, planned: value.planned, percent: value.percent });
   }
 
-  function validateModules(value) {
+  function validateAssessment(value, run, state) {
+    if (!exactKeys(value, ["sentence", "tone", "confidence", "coverage", "disclaimer"], [])) {
+      throw new Error("Lantern returned an invalid assessment.");
+    }
+    if (
+      !SUMMARY_TONES.has(value.tone) ||
+      !CONFIDENCE_LEVELS.has(value.confidence) ||
+      !COVERAGE_LEVELS.has(value.coverage)
+    ) {
+      throw new Error("Lantern returned an invalid assessment.");
+    }
+    const needsDisclaimer = Boolean(run && (run.goal === "network" || run.goal === "rescue"));
+    let disclaimer = null;
+    if (value.disclaimer !== null) {
+      disclaimer = requiredSafeText(value.disclaimer, 300, "assessment disclaimer");
+    }
+    if (needsDisclaimer !== (disclaimer !== null)) {
+      throw new Error("Lantern returned an inconsistent assessment boundary.");
+    }
+    if (run && run.goal === "network" && disclaimer !== NETWORK_DISCLAIMER) {
+      throw new Error("Lantern returned an incomplete network assessment boundary.");
+    }
+    if (run && run.goal === "rescue" && disclaimer !== RESCUE_DISCLAIMER) {
+      throw new Error("Lantern returned an incomplete rescue assessment boundary.");
+    }
+    if (
+      (value.coverage === "none") !== (value.confidence === "none") ||
+      (value.coverage === "partial" && value.confidence !== "low")
+    ) {
+      throw new Error("Lantern returned inconsistent assessment confidence.");
+    }
+    if (
+      (state === "ready" || state === "running" || state === "failed") &&
+      (value.confidence !== "none" || value.coverage !== "none")
+    ) {
+      throw new Error("Lantern returned an unsupported live assessment conclusion.");
+    }
+    return Object.freeze({
+      sentence: requiredSafeText(value.sentence, 240, "assessment sentence"),
+      tone: value.tone,
+      confidence: value.confidence,
+      coverage: value.coverage,
+      disclaimer: disclaimer,
+    });
+  }
+
+  function validateIssues(value) {
+    if (!Array.isArray(value) || value.length > 3) {
+      throw new Error("Lantern returned an invalid priority issue list.");
+    }
+    const codes = new Set();
+    return Object.freeze(value.map((issue) => {
+      if (!exactKeys(issue, ["code", "title", "explanation", "next_step", "module", "severity"], [])) {
+        throw new Error("Lantern returned an invalid priority issue.");
+      }
+      if (
+        typeof issue.code !== "string" ||
+        issue.code.length > 96 ||
+        !ISSUE_CODES.has(issue.code) ||
+        codes.has(issue.code) ||
+        ISSUE_CODE_MODULE[issue.code] !== issue.module ||
+        !ISSUE_SEVERITIES.has(issue.severity) ||
+        issue.severity !== (CRITICAL_ISSUE_CODES.has(issue.code) ? "critical" : "attention")
+      ) {
+        throw new Error("Lantern returned an invalid priority issue.");
+      }
+      codes.add(issue.code);
+      return Object.freeze({
+        code: issue.code,
+        title: requiredSafeText(issue.title, 120, "priority issue title"),
+        explanation: requiredSafeText(issue.explanation, 240, "priority issue explanation"),
+        next_step: requiredSafeText(issue.next_step, 240, "priority issue next step"),
+        module: issue.module,
+        severity: issue.severity,
+      });
+    }));
+  }
+
+  function validatePath(value) {
+    if (!Array.isArray(value) || value.length !== PATH_SPECS.length) {
+      throw new Error("Lantern returned an invalid path.");
+    }
+    return Object.freeze(value.map((node, index) => {
+      const spec = PATH_SPECS[index];
+      if (!exactKeys(node, ["id", "label", "status", "detail", "module"], [])) {
+        throw new Error("Lantern returned an invalid path node.");
+      }
+      if (
+        node.id !== spec.id ||
+        node.label !== spec.label ||
+        !PATH_STATUSES.has(node.status) ||
+        node.module !== spec.module
+      ) {
+        throw new Error("Lantern returned an invalid path node.");
+      }
+      return Object.freeze({
+        id: node.id,
+        label: node.label,
+        status: node.status,
+        detail: requiredSafeText(node.detail, 200, "path detail"),
+        module: node.module,
+      });
+    }));
+  }
+
+  function validateModules(value, goal) {
     if (!Array.isArray(value) || value.length !== MODULE_IDS.length) {
       throw new Error("Lantern returned an invalid module list.");
     }
+    const expectedOrder = GOAL_MODULE_ORDER[goal];
     return Object.freeze(value.map((module, index) => {
-      if (!exactKeys(module, ["id", "label", "status", "detail"], [])) {
+      if (!exactKeys(module, ["id", "label", "status", "detail", "finding", "technical"], [])) {
         throw new Error("Lantern returned an invalid module result.");
       }
-      if (module.id !== MODULE_IDS[index] || !MODULE_STATUSES.has(module.status)) {
+      if (
+        module.id !== expectedOrder[index] ||
+        !MODULE_STATUSES.has(module.status) ||
+        !Array.isArray(module.technical) ||
+        module.technical.length > 4
+      ) {
         throw new Error("Lantern returned an invalid module result.");
       }
       return Object.freeze({
         id: module.id,
-        label: boundedText(module.label, 64, PAGE_META[module.id].title),
+        label: requiredSafeText(module.label, 64, "module label"),
         status: module.status,
-        detail: boundedText(module.detail, 500, "No safe detail is available for this module."),
+        detail: requiredSafeText(module.detail, 500, "module detail"),
+        finding: requiredSafeText(module.finding, 180, "module finding"),
+        technical: Object.freeze(module.technical.map((item) => requiredSafeText(item, 180, "technical context"))),
       });
     }));
   }
@@ -296,25 +509,67 @@
   }
 
   function validateStatus(value) {
-    if (!exactKeys(value, ["schema", "product", "transport", "state", "summary", "run", "progress", "modules", "capabilities"], [])) {
+    if (!exactKeys(value, ["schema", "product", "transport", "state", "summary", "assessment", "issues", "path", "run", "progress", "modules", "capabilities"], [])) {
       throw new Error("Lantern returned an invalid status snapshot.");
     }
-    if (value.schema !== "lantern.ui.v1" || value.product !== "Lantern" || value.transport !== "loopback" || !STATES.has(value.state)) {
+    if (value.schema !== "lantern.ui.v2" || value.product !== "Lantern" || value.transport !== "loopback" || !STATES.has(value.state)) {
       throw new Error("Lantern returned an unsupported status snapshot.");
     }
     const run = validateRun(value.run);
     if ((value.state === "ready") !== (run === null)) {
       throw new Error("Lantern returned an inconsistent diagnostic state.");
     }
+    if (value.state === "cancelled" && run.cancel_requested !== true) {
+      throw new Error("Lantern returned an unrequested cancellation.");
+    }
+    const summary = validateSummary(value.summary);
+    const assessment = validateAssessment(value.assessment, run, value.state);
+    if (assessment.tone !== summary.tone) {
+      throw new Error("Lantern returned an inconsistent assessment tone.");
+    }
+    if (
+      ((value.state === "ready" || value.state === "running") && assessment.tone !== "neutral") ||
+      ((value.state === "cancelled" || value.state === "failed") && assessment.tone !== "attention" && assessment.tone !== "critical") ||
+      (value.state === "completed" && assessment.tone === "neutral")
+    ) {
+      throw new Error("Lantern returned an inconsistent state assessment.");
+    }
+    const issues = validateIssues(value.issues);
+    const path = validatePath(value.path);
+    const modules = validateModules(value.modules, run ? run.goal : "problem");
+    if (
+      assessment.tone === "positive" &&
+      (
+        value.state !== "completed" ||
+        assessment.coverage !== "complete" ||
+        issues.length !== 0 ||
+        path.some((node) => node.status !== "ok") ||
+        modules.some((module) => module.status !== "ok")
+      )
+    ) {
+      throw new Error("Lantern returned an unsupported positive assessment.");
+    }
+    if (issues.some((issue) => issue.severity === "critical") && assessment.tone !== "critical") {
+      throw new Error("Lantern returned an understated critical assessment.");
+    }
+    const hasAttention = issues.length > 0 ||
+      path.some((node) => node.status === "attention") ||
+      modules.some((module) => module.status === "attention");
+    if (hasAttention && assessment.tone !== "attention" && assessment.tone !== "critical") {
+      throw new Error("Lantern returned an understated attention assessment.");
+    }
     return Object.freeze({
       schema: value.schema,
       product: value.product,
       transport: value.transport,
       state: value.state,
-      summary: validateSummary(value.summary),
+      summary: summary,
+      assessment: assessment,
+      issues: issues,
+      path: path,
       run: run,
       progress: validateProgress(value.progress),
-      modules: validateModules(value.modules),
+      modules: modules,
       capabilities: validateCapabilities(value.capabilities),
     });
   }
@@ -447,6 +702,7 @@
     pollInFlight = false;
     authenticated = false;
     csrfToken = null;
+    sessionCleared = true;
     stopPolling();
     newCheckButton.disabled = true;
     setSessionActionsDisabled(true);
@@ -503,6 +759,7 @@
       expectedGeneration = activeGeneration;
       csrfToken = session.csrf_token;
       authenticated = true;
+      sessionCleared = false;
       armSessionExpiry(session.expires_in, activeGeneration);
       connectionState.textContent = "Private local session";
       newCheckButton.disabled = false;
@@ -702,7 +959,7 @@
     const mark = createElement("span", "module-mark");
     mark.append(createIcon(MODULE_ICONS[module.id]));
     heading.append(mark, createElement("h3", "", module.label), statusBadge(module.status));
-    button.append(heading, createElement("p", "module-detail", module.detail));
+    button.append(heading, createElement("p", "module-detail", module.finding));
     const action = createElement("span", "module-action", "View module");
     action.append(createIcon("arrow-right"));
     button.append(action);
@@ -730,23 +987,138 @@
     return panel;
   }
 
-  function summaryPanel() {
+  function renderStatusUnavailable() {
+    const panel = createElement("section", "panel connection-panel");
+    const copy = createElement("div", "");
+    if (sessionCleared) {
+      copy.append(createElement("h2", "", "Lantern is disconnected"));
+      copy.append(createElement("p", "", "This page no longer has a private local session. Launch Lantern again to continue."));
+    } else {
+      copy.append(createElement("h2", "", "Connecting to Lantern"));
+      copy.append(createElement("p", "", "Waiting for a private local status. No diagnostic starts automatically."));
+    }
+    panel.append(copy);
+    return panel;
+  }
+
+  function assessmentPanel() {
     if (!statusSnapshot) {
       const panel = createElement("section", "panel connection-panel");
       panel.append(createIcon("lock"), createElement("h2", "", "No authenticated local status"));
       panel.append(createElement("p", "", "Launch Lantern again if this tab no longer has a private local session."));
       return panel;
     }
-    const panel = createElement("section", "summary-panel tone-" + statusSnapshot.summary.tone);
-    const copy = createElement("div", "summary-copy");
-    copy.append(createElement("p", "eyebrow", statusSnapshot.state === "running" ? "Check in progress" : "Current assessment"));
-    copy.append(createElement("h2", "", statusSnapshot.summary.headline));
-    copy.append(createElement("p", "", statusSnapshot.summary.detail));
+    const assessment = statusSnapshot.assessment;
+    const panel = createElement("section", "summary-panel assessment-panel tone-" + assessment.tone);
+    const copy = createElement("div", "summary-copy assessment-copy");
+    copy.append(createElement("p", "eyebrow", statusSnapshot.state === "running" ? "Assessment in progress" : "Lantern assessment"));
+    copy.append(createElement("h2", "", assessment.sentence));
+    copy.append(createElement("p", "assessment-detail", statusSnapshot.summary.detail));
+
+    const facts = document.createElement("dl");
+    facts.className = "assessment-facts";
+    const confidence = createElement("div", "assessment-fact");
+    confidence.append(createElement("dt", "", "Confidence"), createElement("dd", "", CONFIDENCE_LABELS[assessment.confidence]));
+    const coverage = createElement("div", "assessment-fact");
+    coverage.append(createElement("dt", "", "Coverage"), createElement("dd", "", COVERAGE_LABELS[assessment.coverage]));
+    facts.append(confidence, coverage);
+    copy.append(facts);
+
+    if (assessment.disclaimer !== null) {
+      const boundary = createElement("div", "assessment-boundary");
+      boundary.append(createIcon("info"), createElement("p", "", assessment.disclaimer));
+      copy.append(boundary);
+    }
     panel.append(copy);
     const shield = createElement("span", "summary-mark");
-    shield.append(createIcon(statusSnapshot.summary.tone === "positive" ? "shield-check" : "shield"));
+    shield.append(createIcon(assessment.tone === "positive" ? "shield-check" : "shield"));
     panel.append(shield);
     return panel;
+  }
+
+  function renderPriorityIssues() {
+    if (!statusSnapshot || statusSnapshot.state === "ready" || statusSnapshot.state === "running") {
+      return null;
+    }
+    const section = createElement("section", "priority-section");
+    const heading = createElement("div", "section-heading-row");
+    heading.append(createElement("div", "", ""));
+    const headingCopy = heading.firstElementChild;
+    headingCopy.append(createElement("p", "eyebrow", "What deserves attention"));
+    headingCopy.append(createElement("h2", "section-title", "Priority review"));
+    heading.append(createElement("span", "issue-count", String(statusSnapshot.issues.length) + " of 3 maximum"));
+    section.append(heading);
+
+    if (statusSnapshot.issues.length === 0) {
+      const empty = createElement("div", "panel priority-empty");
+      const fullyPositive = statusSnapshot.assessment.tone === "positive" && statusSnapshot.assessment.coverage === "complete";
+      empty.append(createIcon(fullyPositive ? "check" : "unknown"));
+      const copy = createElement("div", "");
+      const title = fullyPositive
+        ? "No priority issue was returned from the completed plan"
+        : "No priority issue is available from this run";
+      copy.append(createElement("h3", "", title));
+      copy.append(createElement("p", "", "Use the confidence, coverage, path, and module states above before drawing a broader conclusion."));
+      empty.append(copy);
+      section.append(empty);
+      return section;
+    }
+
+    const grid = createElement("div", "issue-grid");
+    statusSnapshot.issues.forEach(function (issue, index) {
+      const card = createElement("article", "panel issue-card issue-" + issue.severity);
+      const cardHeading = createElement("div", "issue-card-heading");
+      cardHeading.append(createElement("span", "issue-rank", String(index + 1)));
+      const title = createElement("div", "");
+      title.append(createElement("p", "issue-module", PAGE_META[issue.module].title));
+      title.append(createElement("h3", "", issue.title));
+      cardHeading.append(title);
+      card.append(cardHeading, createElement("p", "issue-explanation", issue.explanation));
+      const next = createElement("div", "safe-next-step");
+      next.append(createIcon("arrow-right"));
+      const nextCopy = createElement("div", "");
+      nextCopy.append(createElement("strong", "", "Safe next step"), createElement("p", "", issue.next_step));
+      next.append(nextCopy);
+      card.append(next);
+      grid.append(card);
+    });
+    section.append(grid);
+    return section;
+  }
+
+  function pathStatusBadge(status) {
+    const badge = createElement("span", "path-status path-status-" + status);
+    badge.append(createIcon(PATH_STATUS_ICONS[status]), document.createTextNode(PATH_STATUS_LABELS[status]));
+    return badge;
+  }
+
+  function renderLanternPath() {
+    if (!statusSnapshot) {
+      return null;
+    }
+    const section = createElement("section", "path-section");
+    const heading = createElement("div", "section-heading-row");
+    const headingCopy = createElement("div", "");
+    headingCopy.append(createElement("p", "eyebrow", "Five diagnostic layers"));
+    headingCopy.append(createElement("h2", "section-title", "Lantern Path"));
+    heading.append(headingCopy, createElement("p", "section-note", "A diagnostic-layer map—not a network topology. DNS and local services are independent views."));
+    section.append(heading);
+    const path = document.createElement("ol");
+    path.className = "lantern-path";
+    path.setAttribute("aria-label", "Lantern Path diagnostic-layer map");
+    statusSnapshot.path.forEach(function (node, index) {
+      const spec = PATH_SPECS[index];
+      const item = createElement("li", "path-node path-node-" + node.status);
+      const mark = createElement("span", "path-mark");
+      mark.append(createIcon(spec.icon));
+      const copy = createElement("div", "path-copy");
+      copy.append(createElement("h3", "", node.label), pathStatusBadge(node.status));
+      copy.append(createElement("p", "", node.detail));
+      item.append(mark, copy);
+      path.append(item);
+    });
+    section.append(path);
+    return section;
   }
 
   function choiceRow(name, value, title, detail) {
@@ -760,6 +1132,11 @@
     copy.append(createElement("strong", "", title), createElement("small", "", detail));
     label.append(input, copy);
     return label;
+  }
+
+  function goalEmphasisText(goal) {
+    const emphasis = GOAL_EMPHASIS[goal];
+    return emphasis.label + ". Priority emphasis: " + emphasis.priority + ".";
   }
 
   function renderStartPanel() {
@@ -777,10 +1154,21 @@
     goals.append(createElement("legend", "", "What needs help?"));
     goals.append(
       choiceRow("goal", "problem", "Something is not working", "Check the local network path and explain what is confirmed."),
-      choiceRow("goal", "network", "Evaluate this network", "Focus the explanation on network viability."),
+      choiceRow("goal", "network", "Evaluate this network", "Prioritize path viability for a household, business, or municipality."),
       choiceRow("goal", "rescue", "Gather network context for recovery", "Network viability only—not boot, hardware, storage, encryption, or recoverability."),
     );
     form.append(goals);
+
+    const emphasis = createElement("div", "presentation-emphasis");
+    emphasis.id = "goal-emphasis";
+    const emphasisCopy = createElement("p", "");
+    emphasisCopy.id = "goal-emphasis-copy";
+    emphasisCopy.setAttribute("aria-live", "polite");
+    emphasisCopy.textContent = goalEmphasisText(draftGoal);
+    emphasis.append(createIcon("overview"), emphasisCopy);
+    const scopeCopy = createElement("p", "goal-scope-copy", "Goal selection changes priority emphasis, module presentation order, and priority-issue ordering only. It never changes the diagnostic profile, packet activity, or scan scope. Run network checks only on a network you own, manage, or are explicitly authorized to assess. " + NETWORK_DISCLAIMER);
+    emphasis.append(scopeCopy);
+    form.append(emphasis);
 
     const passive = createElement("div", "consent-fact");
     passive.append(createIcon("eye"));
@@ -854,17 +1242,29 @@
 
   function renderOverview() {
     const fragment = document.createDocumentFragment();
-    fragment.append(summaryPanel());
-    if (!statusSnapshot || statusSnapshot.state !== "running") {
+    fragment.append(assessmentPanel());
+    if (!statusSnapshot || statusSnapshot.state === "ready") {
       fragment.append(renderStartPanel());
     }
-    fragment.append(renderModules("Module coverage"), capabilityPanel());
+    const priority = renderPriorityIssues();
+    const path = renderLanternPath();
+    if (priority) {
+      fragment.append(priority);
+    }
+    if (path) {
+      fragment.append(path);
+    }
+    fragment.append(renderModules("Module coverage"));
+    if (statusSnapshot && statusSnapshot.state !== "ready" && statusSnapshot.state !== "running") {
+      fragment.append(renderStartPanel());
+    }
+    fragment.append(capabilityPanel());
     return fragment;
   }
 
   function renderDevice() {
     const fragment = document.createDocumentFragment();
-    fragment.append(summaryPanel());
+    fragment.append(assessmentPanel());
     const panel = createElement("section", "panel explanation-panel");
     panel.append(createIcon("device"), createElement("h2", "", "Network-facing device context"));
     panel.append(createElement("p", "", "This diagnostic may observe local interface, routing, Wi-Fi, and neighbor-table state. It does not claim to evaluate processor, memory, battery, storage, operating-system integrity, or general hardware health."));
@@ -874,7 +1274,12 @@
 
   function renderNetwork() {
     const fragment = document.createDocumentFragment();
-    fragment.append(summaryPanel(), renderModules("From local link to name resolution"));
+    fragment.append(assessmentPanel());
+    const path = renderLanternPath();
+    if (path) {
+      fragment.append(path);
+    }
+    fragment.append(renderModules("From local link to name resolution"));
     const note = createElement("section", "panel explanation-panel");
     note.append(createIcon("shield"), createElement("h2", "", "The profile is the boundary"));
     note.append(createElement("p", "", "Passive reads local state without diagnostic packets. Basic network checks add only the bounded traffic described before you start. Neither profile performs an active LAN sweep."));
@@ -896,7 +1301,43 @@
     const mark = createElement("span", "module-mark module-mark-large");
     mark.append(createIcon(MODULE_ICONS[module.id]));
     heading.append(mark, createElement("h2", "", module.label), statusBadge(module.status));
-    panel.append(heading, createElement("p", "module-focus-detail", module.detail));
+    panel.append(heading);
+    const finding = createElement("div", "module-finding");
+    finding.append(createElement("p", "eyebrow", "Safe finding summary"));
+    finding.append(createElement("h3", "", module.finding));
+    finding.append(createElement("p", "module-focus-detail", module.detail));
+    panel.append(finding);
+
+    const related = statusSnapshot.issues.filter((issue) => issue.module === module.id);
+    if (related.length > 0) {
+      const next = createElement("section", "module-next-step");
+      next.append(createIcon("arrow-right"));
+      const nextCopy = createElement("div", "");
+      nextCopy.append(createElement("h3", "", "Safe next step"), createElement("p", "", related[0].next_step));
+      next.append(nextCopy);
+      panel.append(next);
+    }
+
+    const disclosure = document.createElement("details");
+    disclosure.className = "technical-disclosure";
+    disclosure.id = "technical-disclosure-" + module.id;
+    const disclosureSummary = document.createElement("summary");
+    disclosureSummary.id = "technical-summary-" + module.id;
+    disclosureSummary.append(createElement("span", "", "Technical context"));
+    disclosureSummary.append(createElement("small", "", "Safe, identifier-free detail"));
+    disclosure.append(disclosureSummary);
+    const disclosureBody = createElement("div", "technical-disclosure-body");
+    if (module.technical.length === 0) {
+      disclosureBody.append(createElement("p", "", "No additional technical context is available for this module state."));
+    } else {
+      const list = document.createElement("ul");
+      for (const item of module.technical) {
+        list.append(createElement("li", "", item));
+      }
+      disclosureBody.append(list);
+    }
+    disclosure.append(disclosureBody);
+    panel.append(disclosure);
     const truth = createElement("div", "truth-row");
     truth.append(createIcon("info"), createElement("p", "", "This is the bounded presentation returned by Lantern. Raw addresses, device identifiers, evidence payloads, and credentials are not sent to this page."));
     panel.append(truth);
@@ -991,14 +1432,23 @@
   }
 
   function renderCurrentView() {
+    const unavailable = statusSnapshot === null;
     const meta = PAGE_META[currentView] || PAGE_META.overview;
-    pageEyebrow.textContent = meta.eyebrow;
-    pageTitle.textContent = meta.title;
-    pageDescription.textContent = meta.description;
+    pageEyebrow.textContent = unavailable ? "Local only" : meta.eyebrow;
+    pageTitle.textContent = unavailable
+      ? (sessionCleared ? "Local session closed" : "Connecting")
+      : meta.title;
+    pageDescription.textContent = unavailable
+      ? (sessionCleared
+        ? "Lantern has stopped using this private local session."
+        : "Lantern is waiting for its private local service.")
+      : meta.description;
     renderProgress();
 
     let content;
-    if (currentView === "overview") {
+    if (unavailable) {
+      content = renderStatusUnavailable();
+    } else if (currentView === "overview") {
       content = renderOverview();
     } else if (currentView === "device") {
       content = renderDevice();
@@ -1019,7 +1469,15 @@
     const focusId = active && pageContent.contains(active) ? active.id : "";
     const focusModule = active && pageContent.contains(active) ? active.dataset.moduleTarget : "";
     const focusGoal = active && pageContent.contains(active) && active.name === "goal" ? active.value : "";
+    const openDisclosure = pageContent.querySelector("details.technical-disclosure[open]");
+    const openDisclosureId = openDisclosure ? openDisclosure.id : "";
     pageContent.replaceChildren(content);
+    if (openDisclosureId) {
+      const replacementDisclosure = document.getElementById(openDisclosureId);
+      if (replacementDisclosure) {
+        replacementDisclosure.open = true;
+      }
+    }
     let replacement = focusId ? document.getElementById(focusId) : null;
     if (!replacement && focusModule) {
       replacement = Array.from(pageContent.querySelectorAll("[data-module-target]")).find((item) => item.dataset.moduleTarget === focusModule);
@@ -1261,6 +1719,10 @@
     const target = event.target;
     if (target.name === "goal" && GOALS.has(target.value)) {
       draftGoal = target.value;
+      const emphasis = document.getElementById("goal-emphasis-copy");
+      if (emphasis) {
+        emphasis.textContent = goalEmphasisText(draftGoal);
+      }
     } else if (target.id === "basic-network-checks") {
       draftBasic = target.checked;
       if (!draftBasic) {
