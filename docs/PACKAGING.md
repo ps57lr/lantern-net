@@ -181,7 +181,12 @@ Run the sealed bootstrap on the Mac that holds the pinned Developer ID Applicati
 It verifies the reviewed runtime archive before executing it, extracts it into a fresh private
 directory, removes all executable bytecode caches, verifies the complete transformed runtime
 tree, installs the exact six hash-pinned wheels offline with bytecode compilation disabled,
-and verifies the complete build-environment tree. The release then builds its own unsigned
+removes unused activation/console launchers whose contents contain the random temporary build
+path, and removes only those launchers' exact matching `../../../bin/` rows from wheel `RECORD`
+metadata. The three retained Python launchers and `pyvenv.cfg` are validated semantically
+against the exact pinned runtime, including disabled system site-packages. Installed package
+code and retained metadata remain covered by the pinned complete site-packages tree hash. The
+release then builds its own unsigned
 precursor from the same clean commit and signs only those fresh bytes. External unsigned
 artifacts are not accepted as signing input, and there is no dirty-release override.
 

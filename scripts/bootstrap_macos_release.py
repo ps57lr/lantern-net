@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
+import io
 import json
 import os
 import posixpath
+import shlex
 import shutil
 import stat
 import subprocess
@@ -36,11 +39,11 @@ SYSTEM_PYTHON_RUNTIME = Path(
     "Python3.framework/Versions/3.9/bin/python3.9"
 )
 SYSTEM_PYTHON_RUNTIME_SHA256 = "271143990bc83af0fb2404a255038f5faafb96df1584ed7f085e5018c0f33ffb"
-RUNTIME_LOCK_SHA256 = "ab6582b81a411e0afeac0f5e9d8f06515f67915b2cdb6e58d7517c0f27df7c2a"
+RUNTIME_LOCK_SHA256 = "523fde449f9e3587b2e662ad053b8bb5c99cb26139591fa1fd8113a22aa1e2b9"
 BUILD_LOCK_SHA256 = "9ef83fb5980dc61a78b75d116955d5cc485f020d556f596e9b6213068073a23e"
 RUNTIME_ARCHIVE_SHA256 = "7dc10e31eede05a6ab1ec9e0b961f521078b0959f838ed1d7452597d529ff802"
 RUNTIME_TREE_SHA256 = "89f2b0d5e85dc62c5ec225dc850e097f863c7406d23a2835a4e983f050ee093d"
-BUILD_SITE_PACKAGES_SHA256 = "d027604b53d335f21c22687cfa4e69d83c7a1468664ebbbe502f5377388bb5fd"
+BUILD_SITE_PACKAGES_SHA256 = "c6f4d93a0091bc6d86b118dbb05b85af5209b30c5d4b4048fbf17fe052bcb33d"
 PYTHON_EXECUTABLE_SHA256 = "95c331c5e61804b2dcea00dd105fbf7c9e417aaabff23fa5da6758d84033029d"
 LIBPYTHON_SHA256 = "39669f88807bff419376e0ba17ae68d194f065f7959fb61cd4777af65da09e51"
 WHEELS = {
@@ -66,6 +69,9 @@ WHEELS = {
 MAX_MEMBERS = 20_000
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+MAX_RECORD_BYTES = 1024 * 1024
+MAX_PYVENV_BYTES = 4096
+_RETAINED_BUILD_BIN = frozenset({"python", "python3", "python3.11"})
 
 
 class BootstrapError(RuntimeError):
@@ -251,6 +257,236 @@ def remove_bytecode(root: Path) -> None:
             shutil.rmtree(path)
 
 
+def _replace_record(record: Path, rows: list[list[str]]) -> None:
+    """Atomically replace one validated RECORD through its real parent directory."""
+
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator="\n").writerows(rows)
+    encoded = buffer.getvalue().encode("utf-8")
+    if len(encoded) > MAX_RECORD_BYTES:
+        raise BootstrapError("normalized installed-package record is too large")
+
+    original = record.lstat()
+    original_parent = record.parent.lstat()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    temporary_name = ".RECORD.lantern-normalized"
+    file_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        file_flags |= os.O_NOFOLLOW
+    try:
+        directory_descriptor = os.open(str(record.parent), directory_flags)
+        try:
+            opened_parent = os.fstat(directory_descriptor)
+            if (opened_parent.st_dev, opened_parent.st_ino, opened_parent.st_mode) != (
+                original_parent.st_dev,
+                original_parent.st_ino,
+                original_parent.st_mode,
+            ):
+                raise BootstrapError("installed-package metadata changed before normalization")
+            current = os.stat(record.name, dir_fd=directory_descriptor, follow_symlinks=False)
+            if (current.st_dev, current.st_ino, current.st_mode) != (
+                original.st_dev,
+                original.st_ino,
+                original.st_mode,
+            ):
+                raise BootstrapError("installed-package record changed before normalization")
+            descriptor = os.open(
+                temporary_name,
+                file_flags,
+                stat.S_IMODE(original.st_mode),
+                dir_fd=directory_descriptor,
+            )
+            try:
+                with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                    os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode))
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                descriptor = -1
+                raise
+            os.replace(
+                temporary_name,
+                record.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BootstrapError:
+        raise
+    except OSError as exc:
+        raise BootstrapError("installed-package record could not be normalized") from exc
+
+
+def canonicalize_build_environment(build_environment: Path, *, runtime: Path) -> Path:
+    """Validate the venv binding and remove unused path-bound launchers."""
+
+    binary_directory = build_environment / "bin"
+    library_directory = build_environment / "lib"
+    version_directory = library_directory / "python3.11"
+    site_packages = build_environment / "lib" / "python3.11" / "site-packages"
+    configuration = build_environment / "pyvenv.cfg"
+    if (
+        build_environment.is_symlink()
+        or not build_environment.is_dir()
+        or binary_directory.is_symlink()
+        or not binary_directory.is_dir()
+        or library_directory.is_symlink()
+        or not library_directory.is_dir()
+        or version_directory.is_symlink()
+        or not version_directory.is_dir()
+        or site_packages.is_symlink()
+        or not site_packages.is_dir()
+        or configuration.is_symlink()
+        or not configuration.is_file()
+        or configuration.stat().st_size > MAX_PYVENV_BYTES
+    ):
+        raise BootstrapError("sealed build environment has an invalid layout")
+    resolved_environment = build_environment.resolve(strict=True)
+    for directory in (binary_directory, library_directory, version_directory, site_packages):
+        try:
+            directory.resolve(strict=True).relative_to(resolved_environment)
+        except ValueError as exc:
+            raise BootstrapError("sealed build environment escapes its root") from exc
+
+    expected_executable = (runtime / "bin" / "python3.11").resolve(strict=True)
+    if expected_executable.is_symlink() or not expected_executable.is_file():
+        raise BootstrapError("sealed runtime executable is invalid")
+
+    expected_links = {
+        "python": "python3.11",
+        "python3": "python3.11",
+    }
+    for name, target in expected_links.items():
+        launcher = binary_directory / name
+        if not launcher.is_symlink() or os.readlink(str(launcher)) != target:
+            raise BootstrapError("sealed Python launcher is invalid")
+    versioned_launcher = binary_directory / "python3.11"
+    if (
+        not versioned_launcher.is_symlink()
+        or versioned_launcher.resolve(strict=True) != expected_executable
+    ):
+        raise BootstrapError("sealed Python launcher is invalid")
+
+    try:
+        configuration_lines = configuration.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise BootstrapError("sealed Python configuration could not be read") from exc
+    configuration_values: dict[str, str] = {}
+    for line in configuration_lines:
+        key, separator, value = line.partition(" = ")
+        if not separator or not key or key in configuration_values or not value:
+            raise BootstrapError("sealed Python configuration is invalid")
+        configuration_values[key] = value
+    if set(configuration_values) != {
+        "home",
+        "include-system-site-packages",
+        "version",
+        "executable",
+        "command",
+    }:
+        raise BootstrapError("sealed Python configuration is invalid")
+    try:
+        command = shlex.split(configuration_values["command"], posix=True)
+        home = Path(configuration_values["home"]).resolve(strict=True)
+        configured_executable = Path(configuration_values["executable"]).resolve(strict=True)
+        command_executable = Path(command[0]).resolve(strict=True)
+        command_environment = Path(command[3]).resolve(strict=True)
+    except (IndexError, OSError, ValueError) as exc:
+        raise BootstrapError("sealed Python configuration is invalid") from exc
+    if (
+        configuration_values["include-system-site-packages"] != "false"
+        or configuration_values["version"] != "3.11.15"
+        or home != expected_executable.parent
+        or configured_executable != expected_executable
+        or len(command) != 4
+        or command[1:3] != ["-m", "venv"]
+        or command_executable != expected_executable
+        or command_environment != build_environment.resolve(strict=True)
+    ):
+        raise BootstrapError("sealed Python configuration is invalid")
+
+    removed_entries: set[str] = set()
+    for entry in sorted(binary_directory.iterdir(), key=lambda item: item.name):
+        if entry.name in _RETAINED_BUILD_BIN:
+            continue
+        if entry.is_symlink() or entry.is_file():
+            removed_entries.add(entry.name)
+            continue
+        raise BootstrapError("sealed build environment contains an unexpected executable entry")
+
+    dist_info_directories = sorted(site_packages.glob("*.dist-info"))
+    if not dist_info_directories:
+        raise BootstrapError("sealed build environment has no installed-package records")
+    records: list[Path] = []
+    resolved_site_packages = site_packages.resolve(strict=True)
+    for dist_info in dist_info_directories:
+        if dist_info.is_symlink() or not dist_info.is_dir():
+            raise BootstrapError("installed-package metadata directory is invalid")
+        try:
+            if dist_info.resolve(strict=True).parent != resolved_site_packages:
+                raise BootstrapError("installed-package metadata directory is invalid")
+        except OSError as exc:
+            raise BootstrapError("installed-package metadata directory is invalid") from exc
+        records.append(dist_info / "RECORD")
+
+    normalized_records: list[tuple[Path, list[list[str]]]] = []
+    for record in records:
+        if record.is_symlink() or not record.is_file() or record.stat().st_size > MAX_RECORD_BYTES:
+            raise BootstrapError("installed-package record is invalid")
+        try:
+            with record.open("r", encoding="utf-8", newline="") as stream:
+                rows = list(csv.reader(stream))
+        except (OSError, UnicodeError, csv.Error) as exc:
+            raise BootstrapError("installed-package record could not be read") from exc
+        retained: list[list[str]] = []
+        for row in rows:
+            if len(row) != 3 or not row[0] or "\\" in row[0] or "\x00" in row[0]:
+                raise BootstrapError("installed-package record row is invalid")
+            if row[1]:
+                encoded_digest = row[1].removeprefix("sha256=")
+                if (
+                    not row[1].startswith("sha256=")
+                    or len(encoded_digest) != 43
+                    or any(
+                        character
+                        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+                        for character in encoded_digest
+                    )
+                ):
+                    raise BootstrapError("installed-package record digest is invalid")
+            if row[2] and not row[2].isdigit():
+                raise BootstrapError("installed-package record size is invalid")
+            if row[0].startswith("../../../bin/"):
+                launcher_name = row[0].removeprefix("../../../bin/")
+                if (
+                    not launcher_name
+                    or "/" in launcher_name
+                    or launcher_name in _RETAINED_BUILD_BIN
+                    or launcher_name not in removed_entries
+                ):
+                    raise BootstrapError("installed-package record launcher path is invalid")
+                continue
+            record_path = PurePosixPath(row[0])
+            if record_path.is_absolute() or ".." in record_path.parts:
+                raise BootstrapError("installed-package record path is invalid")
+            retained.append(row)
+        if not retained:
+            raise BootstrapError("installed-package record became empty")
+        normalized_records.append((record, retained))
+
+    for entry in sorted(binary_directory.iterdir(), key=lambda item: item.name):
+        if entry.name in removed_entries:
+            entry.unlink()
+    for record, retained in normalized_records:
+        _replace_record(record, retained)
+    return site_packages
+
+
 def verify_wheelhouse(wheelhouse: Path) -> None:
     if wheelhouse.is_symlink() or not wheelhouse.is_dir():
         raise BootstrapError("locked wheelhouse is unavailable")
@@ -395,7 +631,7 @@ def run_release(
         )
         remove_bytecode(runtime)
         remove_bytecode(build_environment)
-        site_packages = build_environment / "lib" / "python3.11" / "site-packages"
+        site_packages = canonicalize_build_environment(build_environment, runtime=runtime)
         if (
             _canonical_tree_sha256(runtime) != RUNTIME_TREE_SHA256
             or _canonical_tree_sha256(site_packages) != BUILD_SITE_PACKAGES_SHA256
