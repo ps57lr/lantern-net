@@ -1,1306 +1,1317 @@
 (function () {
   "use strict";
 
-  const DEMO_MODE = true;
+  const launchMatch = window.location.hash.match(/^#launch=([A-Za-z0-9_-]{32,256})$/);
+  let launchToken = launchMatch ? launchMatch[1] : null;
+  window.history.replaceState(null, "", window.location.pathname);
 
-  const ICON_NAMES = new Set([
-    "alert",
-    "arrow-right",
-    "check",
-    "chevron-right",
-    "clock",
-    "copy",
-    "device",
-    "dns",
-    "download",
-    "gateway",
-    "globe",
-    "info",
-    "key",
-    "lan",
-    "lantern",
-    "lock",
-    "mdns",
-    "network",
-    "ports",
-    "refresh",
-    "rescue",
-    "scan",
-    "session",
-    "share",
-    "shield",
-    "shield-check",
-    "unknown",
-    "wifi",
-    "wrench",
+  const API_METHODS = Object.freeze({
+    "/api/session/exchange": Object.freeze(["POST"]),
+    "/api/session": Object.freeze(["GET"]),
+    "/api/status": Object.freeze(["GET"]),
+    "/api/diagnostics/start": Object.freeze(["POST"]),
+    "/api/diagnostics/cancel": Object.freeze(["POST"]),
+    "/api/session/revoke": Object.freeze(["POST"]),
+  });
+  const CSRF_HEADER = "X-Lantern-CSRF";
+  const MAX_JSON_BYTES = 524288;
+  const REQUEST_TIMEOUT_MS = 8000;
+  const POLL_RUNNING_MS = 700;
+  const POLL_IDLE_MS = 2500;
+
+  const MODULE_IDS = Object.freeze(["route", "wifi", "dns", "lan", "mdns", "ports"]);
+  const MODULE_ICONS = Object.freeze({
+    route: "gateway",
+    wifi: "wifi",
+    dns: "dns",
+    lan: "lan",
+    mdns: "mdns",
+    ports: "ports",
+  });
+  const STATES = new Set(["ready", "running", "completed", "cancelled", "failed"]);
+  const GOALS = new Set(["problem", "network", "rescue"]);
+  const PROFILES = new Set(["passive", "low_impact_network"]);
+  const SUMMARY_TONES = new Set(["neutral", "positive", "attention", "critical"]);
+  const MODULE_STATUSES = new Set([
+    "not_started",
+    "queued",
+    "running",
+    "ok",
+    "attention",
+    "limited",
+    "unavailable",
+    "not_run",
+    "cancelled",
   ]);
-
-  const STATUS = Object.freeze({
-    healthy: Object.freeze({ label: "Healthy", icon: "check" }),
-    attention: Object.freeze({ label: "Needs attention", icon: "alert" }),
-    critical: Object.freeze({ label: "Critical", icon: "alert" }),
-    info: Object.freeze({ label: "Information", icon: "info" }),
-    unknown: Object.freeze({ label: "Not confirmed", icon: "unknown" }),
-    blocked: Object.freeze({ label: "Access needed", icon: "lock" }),
+  const STATUS_LABELS = Object.freeze({
+    not_started: "Not started",
+    queued: "Waiting",
+    running: "Checking",
+    ok: "Completed",
+    attention: "Needs attention",
+    limited: "Partially checked",
+    unavailable: "Unavailable",
+    not_run: "Not checked",
+    cancelled: "Cancelled",
+  });
+  const STATUS_ICONS = Object.freeze({
+    not_started: "clock",
+    queued: "clock",
+    running: "refresh",
+    ok: "check",
+    attention: "alert",
+    limited: "info",
+    unavailable: "unknown",
+    not_run: "clock",
+    cancelled: "clock",
   });
 
   const PAGE_META = Object.freeze({
-    overview: Object.freeze({ eyebrow: "Diagnosis", title: "Overview", description: "The clearest picture of this device and its network path." }),
-    device: Object.freeze({ eyebrow: "Diagnosis", title: "This device", description: "What Lantern can confirm about the computer in front of you." }),
-    network: Object.freeze({ eyebrow: "Network", title: "Network health", description: "Read the connection from the local link outward, one layer at a time." }),
-    route: Object.freeze({ eyebrow: "Network module", title: "Route & internet", description: "Default route, gateway reachability, and the outbound internet path." }),
-    wifi: Object.freeze({ eyebrow: "Network module", title: "Wi-Fi", description: "Association, signal quality, channel, band, and link details." }),
-    dns: Object.freeze({ eyebrow: "Network module", title: "DNS", description: "How configured and comparison resolvers answer the same question." }),
-    lan: Object.freeze({ eyebrow: "Network module", title: "LAN neighbors", description: "Scoped devices observed on the default local network." }),
-    mdns: Object.freeze({ eyebrow: "Network module", title: "mDNS services", description: "Nearby service advertisements observed during a bounded browse window." }),
-    ports: Object.freeze({ eyebrow: "Network module", title: "Service ports", description: "Explicit, bounded TCP reachability checks for an authorized target." }),
-    fixes: Object.freeze({ eyebrow: "Act safely", title: "Fixes", description: "Preview what can change, approve deliberately, verify, and roll back." }),
-    share: Object.freeze({ eyebrow: "Private support", title: "Share a report", description: "Review exactly what remains before anything leaves this computer." }),
-    session: Object.freeze({ eyebrow: "Temporary connection", title: "LAN session", description: "A short-lived, paired, read-only view for someone on this network." }),
-    rescue: Object.freeze({ eyebrow: "Last resort", title: "Rescue viability", description: "Protect data first, then assess hardware, storage, operating system, and network." }),
+    overview: Object.freeze({
+      eyebrow: "Diagnosis",
+      title: "Overview",
+      description: "A local, evidence-bounded view of this device and its network path.",
+    }),
+    device: Object.freeze({
+      eyebrow: "Diagnosis",
+      title: "This device",
+      description: "What the current network-oriented diagnostic can confirm about this computer.",
+    }),
+    network: Object.freeze({
+      eyebrow: "Network",
+      title: "Network path",
+      description: "Six bounded modules, shown honestly even when a check is unavailable or incomplete.",
+    }),
+    route: Object.freeze({ eyebrow: "Network module", title: "Route", description: "Local routing and the path beyond this device." }),
+    wifi: Object.freeze({ eyebrow: "Network module", title: "Wi-Fi", description: "Association and link information available to this platform." }),
+    dns: Object.freeze({ eyebrow: "Network module", title: "DNS", description: "Name-resolution checks included in the authorized profile." }),
+    lan: Object.freeze({ eyebrow: "Network module", title: "LAN", description: "Locally observed neighbor state; basic checks never sweep the LAN." }),
+    mdns: Object.freeze({ eyebrow: "Network module", title: "mDNS", description: "A brief local service browse only when explicitly included." }),
+    ports: Object.freeze({ eyebrow: "Network module", title: "Ports", description: "Bounded service-port checks against the detected gateway only." }),
+    fixes: Object.freeze({ eyebrow: "Act safely", title: "Fixes", description: "Remediation is deliberately unavailable in this live slice." }),
+    rescue: Object.freeze({ eyebrow: "Guidance only", title: "Rescue guidance", description: "Network viability context without boot or recovery claims." }),
+    session: Object.freeze({ eyebrow: "Local only", title: "LAN session", description: "Remote LAN access is not enabled and no LAN listener is running." }),
+    share: Object.freeze({ eyebrow: "Unavailable", title: "Share", description: "Report export and upload are disabled in this live slice." }),
   });
 
-  // The fixture is intentionally isolated from transport and platform APIs. It is
-  // synthetic, contains no user data, and powers only this interface demonstration.
-  const DEMO_FIXTURE = deepFreeze({
-    meta: {
-      mode: "Read-only demonstration",
-      platform: "macOS · demo fixture",
-      started: "Today at 9:41 PM",
-      duration: "18.4 seconds",
-      schema: "Experience fixture 1.0",
-      scope: "This device + passive network",
-    },
-    assessment: {
-      status: "attention",
-      title: "Your internet path works. One DNS answer deserves a closer look.",
-      summary: "The device reaches its gateway and the public internet. The configured resolver returned a different result for one test, which may be intentional filtering rather than a connection failure.",
-      confidence: "Moderate confidence",
-      scope: "Likely DNS-specific",
-    },
-    path: [
-      { id: "device", label: "Device", detail: "Interface active", icon: "device", status: "healthy", target: "device" },
-      { id: "link", label: "Local link", detail: "Wi-Fi is fair", icon: "wifi", status: "attention", target: "wifi" },
-      { id: "gateway", label: "Gateway", detail: "192.168.0.1", icon: "gateway", status: "healthy", target: "route" },
-      { id: "internet", label: "Internet", detail: "TCP/443 works", icon: "globe", status: "healthy", target: "route" },
-      { id: "dns", label: "DNS", detail: "Answers differ", icon: "dns", status: "attention", target: "dns" },
-    ],
-    issues: [
-      {
-        code: "DNS.ANSWER_VARIANCE",
-        status: "attention",
-        title: "One resolver returned a different answer",
-        detail: "That can be normal for content delivery or intentional DNS filtering. Confirm the expected policy before changing anything.",
-        target: "dns",
-      },
-      {
-        code: "WIFI.SIGNAL_FAIR",
-        status: "info",
-        title: "Wi-Fi signal is usable, not excellent",
-        detail: "A fair signal can explain intermittent calls or slower transfers without causing a total outage.",
-        target: "wifi",
-      },
-    ],
-    working: [
-      { title: "Default gateway is reachable", detail: "The device has a valid local path through 192.168.0.1." },
-      { title: "Outbound HTTPS works", detail: "A TCP connection reached a public endpoint." },
-      { title: "LAN scope is deterministic", detail: "Passive neighbors are limited to en0 and 192.168.0.0/24." },
-    ],
-    access: [
-      { title: "DNS administrator", reason: "Needed only if the different answer is not expected policy.", where: "Authorize in the DNS service itself; Lantern does not collect the password.", status: "Not needed yet" },
-      { title: "Router administrator", reason: "Needed only for gateway or Wi-Fi configuration changes.", where: "Open the router's own interface when a reviewed step requires it.", status: "Keep available" },
-    ],
-    modules: {
-      route: {
-        title: "Route & internet",
-        icon: "gateway",
-        status: "healthy",
-        state: "complete",
-        summary: "The gateway and outbound HTTPS path are working.",
-        why: "Routing connects this device to everything beyond its own local address. A broken default path can explain many downstream symptoms at once.",
-        next: "No route change is recommended. Keep this evidence as a known-good layer.",
-        metrics: [
-          { label: "Interface", value: "en0" },
-          { label: "Gateway", value: "192.168.0.1" },
-          { label: "HTTPS path", value: "Working" },
-          { label: "Check time", value: "4.2 s" },
-        ],
-        evidence: [
-          { label: "Default route", value: "Gateway 192.168.0.1 through en0", source: "route adapter" },
-          { label: "Gateway ping", value: "3 of 3 replies in the demo fixture", source: "ICMP probe" },
-          { label: "Outbound TCP", value: "Connected to test endpoint on port 443", source: "socket probe" },
-          { label: "Interpretation", value: "Local and internet routing are corroborated by independent probes.", source: "diagnosis rule" },
-        ],
-      },
-      wifi: {
-        title: "Wi-Fi",
-        icon: "wifi",
-        status: "attention",
-        state: "partial",
-        summary: "Connected with fair signal; brief degradation is plausible.",
-        why: "Signal and link quality can cause slow or intermittent service even when the internet path is otherwise healthy.",
-        next: "If the problem is intermittent, compare another location or access point before changing settings.",
-        metrics: [
-          { label: "Connection", value: "Connected" },
-          { label: "Signal", value: "−69 dBm" },
-          { label: "Band", value: "5 GHz" },
-          { label: "Channel", value: "44" },
-        ],
-        evidence: [
-          { label: "Signal assessment", value: "Fair—expected to work with less margin than a strong signal", source: "Wi-Fi adapter" },
-          { label: "Network name", value: "Hidden in share-safe views", source: "structured redaction" },
-          { label: "Link detail", value: "Security detail unavailable in this fixture", source: "not tested" },
-        ],
-      },
-      dns: {
-        title: "DNS",
-        icon: "dns",
-        status: "attention",
-        state: "partial",
-        summary: "Resolution works, but the configured and comparison answers differ.",
-        why: "DNS turns service names into addresses. Filtering, stale answers, or a resolver failure can look like an internet outage for only some apps.",
-        next: "Confirm whether the configured resolver is meant to filter this domain before applying any fix.",
-        metrics: [
-          { label: "System resolver", value: "192.168.0.53" },
-          { label: "System latency", value: "18 ms" },
-          { label: "Comparison", value: "1.1.1.1" },
-          { label: "Result", value: "Answers differ" },
-        ],
-        evidence: [
-          { label: "Configured answer", value: "0.0.0.0 (possible intentional block)", source: "DNS probe" },
-          { label: "Comparison answer", value: "203.0.113.24 (documentation address)", source: "DNS probe" },
-          { label: "Both responded", value: "Neither resolver timed out", source: "probe timing" },
-          { label: "Interpretation", value: "Difference is real; intent is not known from network evidence alone.", source: "diagnosis rule" },
-        ],
-      },
-      lan: {
-        title: "LAN neighbors",
-        icon: "lan",
-        status: "healthy",
-        state: "complete",
-        summary: "Passive neighbor evidence is scoped to the default interface.",
-        why: "A scoped local view can confirm the gateway and nearby devices without sweeping unrelated VPN, container, or virtual networks.",
-        next: "No active scan is needed for the current question.",
-        metrics: [
-          { label: "Network", value: "192.168.0.0/24" },
-          { label: "Interface", value: "en0" },
-          { label: "Observed", value: "12 entries" },
-          { label: "Discovery", value: "Passive" },
-        ],
-        evidence: [
-          { label: "Source", value: "Route-socket neighbor table", source: "sysctl_rtm" },
-          { label: "Scope", value: "Only addresses in 192.168.0.0/24 on en0", source: "scope policy" },
-          { label: "Meaning", value: "Observed entries may be stale and do not prove current device identity.", source: "evidence note" },
-        ],
-      },
-      mdns: {
-        title: "mDNS services",
-        icon: "mdns",
-        status: "unknown",
-        state: "error",
-        summary: "The bounded browse ended early, so nearby services are unknown.",
-        why: "mDNS reveals services that advertise themselves locally. A brief empty or failed browse is not proof that no services exist.",
-        next: "Retry this module by itself. The rest of the report remains valid.",
-        metrics: [
-          { label: "Browse window", value: "5 seconds" },
-          { label: "Unique", value: "Unknown" },
-          { label: "Raw records", value: "Unknown" },
-          { label: "State", value: "Could not complete" },
-        ],
-        evidence: [
-          { label: "Failure class", value: "Fixture demonstrates an isolated native-tool error", source: "probe boundary" },
-          { label: "Report impact", value: "Other network modules completed normally", source: "orchestrator" },
-        ],
-      },
-      ports: {
-        title: "Service ports",
-        icon: "ports",
-        status: "unknown",
-        state: "unsupported",
-        summary: "No explicit target was approved for a TCP service check.",
-        why: "A port check sends traffic to a named host. Lantern must know the exact authorized target and bounded ports before it runs.",
-        next: "Choose a known device and review the target when this capability is connected.",
-        metrics: [],
-        evidence: [],
-      },
-    },
-    rescue: [
-      { title: "Hardware", status: "unknown", detail: "Firmware diagnostics have not been run." },
-      { title: "Storage", status: "unknown", detail: "No read-only storage evidence is connected." },
-      { title: "Operating system", status: "healthy", detail: "The normal application is currently running." },
-      { title: "Data access", status: "blocked", detail: "Encryption and backup readiness are not assessed." },
-      { title: "Network", status: "attention", detail: "Usable path with one DNS question." },
-    ],
-  });
+  let csrfToken = null;
+  let authenticated = false;
+  let sessionGeneration = 0;
+  let statusSnapshot = null;
+  let currentView = "overview";
+  let pollTimer = null;
+  let sessionExpiryTimer = null;
+  let sessionExpiresAt = 0;
+  let pollInFlight = false;
+  let startInFlight = false;
+  let cancelInFlight = false;
+  let revokeInFlight = false;
+  let draftGoal = "problem";
+  let draftBasic = false;
+  let draftMdns = false;
+  const STALE_SESSION = Object.freeze({ reason: "stale_session" });
 
-  const appState = {
-    view: "overview",
-    menuOpen: false,
-    scan: {
-      phase: "complete",
-      progress: 100,
-      detail: "Read-only check complete",
-    },
-    activeDiscovery: false,
-    sharePreview: false,
-    fixPhase: "preview",
-  };
+  const pageContent = document.getElementById("page-content");
+  const pageTitle = document.getElementById("page-title");
+  const pageEyebrow = document.getElementById("page-eyebrow");
+  const pageDescription = document.getElementById("page-description");
+  const connectionState = document.getElementById("connection-state");
+  const sessionNotice = document.getElementById("session-notice");
+  const sessionMessage = document.getElementById("session-message");
+  const newCheckButton = document.getElementById("new-check-button");
+  const endSessionButton = document.getElementById("end-session-button");
+  const mobileEndSessionButton = document.getElementById("mobile-end-session-button");
+  const cancelButton = document.getElementById("cancel-button");
+  const runProgress = document.getElementById("run-progress");
+  const runProgressDetail = document.getElementById("run-progress-detail");
+  const runProgressValue = document.getElementById("run-progress-value");
+  const runProgressBar = document.getElementById("run-progress-bar");
+  const progressTrack = document.getElementById("progress-track");
+  const runAnnouncement = document.getElementById("run-announcement");
+  const menuToggle = document.getElementById("menu-toggle");
+  const primarySidebar = document.getElementById("primary-sidebar");
+  const sidebarScrim = document.getElementById("sidebar-scrim");
+  const mobileDrawerQuery = window.matchMedia("(max-width: 860px)");
 
-  let scanTimer = null;
-  let fixTimer = null;
-
-  const elements = {};
-
-  function deepFreeze(value) {
-    if (!value || typeof value !== "object" || Object.isFrozen(value)) {
-      return value;
+  function boundedText(value, maximum, fallback) {
+    if (typeof value !== "string" || value.length > maximum) {
+      return fallback;
     }
-    Object.freeze(value);
-    Object.keys(value).forEach(function (key) {
-      deepFreeze(value[key]);
-    });
+    for (const character of value) {
+      const code = character.codePointAt(0);
+      if (code < 32 && character !== "\n" && character !== "\t") {
+        return fallback;
+      }
+    }
     return value;
   }
 
-  function makeElement(tagName, className, text) {
-    const element = document.createElement(tagName);
+  function exactKeys(value, required, optional) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return false;
+    }
+    const allowed = new Set(required.concat(optional));
+    const keys = Object.keys(value);
+    return required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) && keys.every((key) => allowed.has(key));
+  }
+
+  function boundedInteger(value, minimum, maximum) {
+    return Number.isInteger(value) && value >= minimum && value <= maximum;
+  }
+
+  function isCurrentSession(generation) {
+    return authenticated && generation === sessionGeneration;
+  }
+
+  function requireCurrentSession(generation) {
+    if (!isCurrentSession(generation)) {
+      throw STALE_SESSION;
+    }
+  }
+
+  function validateSession(value) {
+    if (!exactKeys(value, ["csrf_token", "expires_in"], [])) {
+      throw new Error("Lantern returned an invalid local session response.");
+    }
+    if (typeof value.csrf_token !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(value.csrf_token)) {
+      throw new Error("Lantern returned an invalid local session response.");
+    }
+    if (!boundedInteger(value.expires_in, 1, 3600)) {
+      throw new Error("Lantern returned an invalid local session response.");
+    }
+    return value;
+  }
+
+  function validateSummary(value) {
+    if (!exactKeys(value, ["tone", "headline", "detail"], [])) {
+      throw new Error("Lantern returned an invalid status summary.");
+    }
+    if (!SUMMARY_TONES.has(value.tone)) {
+      throw new Error("Lantern returned an invalid status summary.");
+    }
+    return Object.freeze({
+      tone: value.tone,
+      headline: boundedText(value.headline, 180, "Summary unavailable."),
+      detail: boundedText(value.detail, 600, "Lantern could not safely display the summary detail."),
+    });
+  }
+
+  function validateRun(value) {
+    if (value === null) {
+      return null;
+    }
+    if (!exactKeys(value, ["goal", "profile", "include_mdns", "cancel_requested", "duration_ms"], [])) {
+      throw new Error("Lantern returned an invalid run status.");
+    }
+    if (!GOALS.has(value.goal) || !PROFILES.has(value.profile)) {
+      throw new Error("Lantern returned an invalid run status.");
+    }
+    if (typeof value.include_mdns !== "boolean" || typeof value.cancel_requested !== "boolean") {
+      throw new Error("Lantern returned an invalid run status.");
+    }
+    if (value.profile === "passive" && value.include_mdns) {
+      throw new Error("Lantern returned an inconsistent run profile.");
+    }
+    if (!boundedInteger(value.duration_ms, 0, 2147483647)) {
+      throw new Error("Lantern returned an invalid run status.");
+    }
+    return Object.freeze({
+      goal: value.goal,
+      profile: value.profile,
+      include_mdns: value.include_mdns,
+      cancel_requested: value.cancel_requested,
+      duration_ms: value.duration_ms,
+    });
+  }
+
+  function validateProgress(value) {
+    if (!exactKeys(value, ["processed", "planned", "percent"], [])) {
+      throw new Error("Lantern returned invalid diagnostic progress.");
+    }
+    if (
+      !boundedInteger(value.processed, 0, 1024) ||
+      !boundedInteger(value.planned, 0, 1024) ||
+      value.processed > value.planned ||
+      !boundedInteger(value.percent, 0, 100)
+    ) {
+      throw new Error("Lantern returned invalid diagnostic progress.");
+    }
+    const expectedPercent = value.planned === 0 ? 0 : Math.round(value.processed * 100 / value.planned);
+    if (value.percent !== expectedPercent) {
+      throw new Error("Lantern returned inconsistent diagnostic progress.");
+    }
+    return Object.freeze({ processed: value.processed, planned: value.planned, percent: value.percent });
+  }
+
+  function validateModules(value) {
+    if (!Array.isArray(value) || value.length !== MODULE_IDS.length) {
+      throw new Error("Lantern returned an invalid module list.");
+    }
+    return Object.freeze(value.map((module, index) => {
+      if (!exactKeys(module, ["id", "label", "status", "detail"], [])) {
+        throw new Error("Lantern returned an invalid module result.");
+      }
+      if (module.id !== MODULE_IDS[index] || !MODULE_STATUSES.has(module.status)) {
+        throw new Error("Lantern returned an invalid module result.");
+      }
+      return Object.freeze({
+        id: module.id,
+        label: boundedText(module.label, 64, PAGE_META[module.id].title),
+        status: module.status,
+        detail: boundedText(module.detail, 500, "No safe detail is available for this module."),
+      });
+    }));
+  }
+
+  function validateCapabilities(value) {
+    const names = [
+      "passive_scan",
+      "low_impact_network",
+      "active_discovery",
+      "remediation",
+      "credentials",
+      "lan_remote",
+      "rescue_boot",
+      "share_export",
+    ];
+    if (!exactKeys(value, names, [])) {
+      throw new Error("Lantern returned an invalid capability description.");
+    }
+    const result = {};
+    for (const name of names) {
+      if (typeof value[name] !== "boolean") {
+        throw new Error("Lantern returned an invalid capability description.");
+      }
+      result[name] = value[name];
+    }
+    if (result.passive_scan !== true || result.low_impact_network !== true) {
+      throw new Error("Lantern returned an incompatible capability description.");
+    }
+    for (const name of ["active_discovery", "remediation", "credentials", "lan_remote", "rescue_boot", "share_export"]) {
+      if (result[name] !== false) {
+        throw new Error("Lantern refused an unsafe capability description.");
+      }
+    }
+    return Object.freeze(result);
+  }
+
+  function validateStatus(value) {
+    if (!exactKeys(value, ["schema", "product", "transport", "state", "summary", "run", "progress", "modules", "capabilities"], [])) {
+      throw new Error("Lantern returned an invalid status snapshot.");
+    }
+    if (value.schema !== "lantern.ui.v1" || value.product !== "Lantern" || value.transport !== "loopback" || !STATES.has(value.state)) {
+      throw new Error("Lantern returned an unsupported status snapshot.");
+    }
+    const run = validateRun(value.run);
+    if ((value.state === "ready") !== (run === null)) {
+      throw new Error("Lantern returned an inconsistent diagnostic state.");
+    }
+    return Object.freeze({
+      schema: value.schema,
+      product: value.product,
+      transport: value.transport,
+      state: value.state,
+      summary: validateSummary(value.summary),
+      run: run,
+      progress: validateProgress(value.progress),
+      modules: validateModules(value.modules),
+      capabilities: validateCapabilities(value.capabilities),
+    });
+  }
+
+  async function apiFetch(route, options) {
+    const method = options && options.method ? options.method : "GET";
+    if (!Object.prototype.hasOwnProperty.call(API_METHODS, route) || !API_METHODS[route].includes(method)) {
+      throw new Error("Lantern blocked an unexpected local request.");
+    }
+    const resolved = new URL(route, window.location.origin);
+    if (resolved.origin !== window.location.origin || resolved.pathname !== route || resolved.search || resolved.hash) {
+      throw new Error("Lantern blocked an unexpected local request.");
+    }
+
+    const headers = { Accept: "application/json" };
+    let body;
+    if (options && Object.prototype.hasOwnProperty.call(options, "body")) {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(options.body);
+    }
+    if (options && options.csrf) {
+      if (typeof csrfToken !== "string") {
+        throw new Error("The local session is not ready for that action.");
+      }
+      headers[CSRF_HEADER] = csrfToken;
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(function () { controller.abort(); }, REQUEST_TIMEOUT_MS);
+    try {
+      const response = await window.fetch(route, {
+        method: method,
+        headers: headers,
+        body: body,
+        credentials: "same-origin",
+        cache: "no-store",
+        redirect: "error",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      });
+      const responseBody = await response.arrayBuffer();
+      if (responseBody.byteLength > MAX_JSON_BYTES) {
+        throw new Error("Lantern returned an oversized local response.");
+      }
+      return new Response(responseBody, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  async function readJson(response) {
+    const contentType = response.headers.get("Content-Type") || "";
+    if (!contentType.toLowerCase().startsWith("application/json")) {
+      throw new Error("Lantern returned an unexpected local response.");
+    }
+    const text = await response.text();
+    if (text.length === 0 || text.length > MAX_JSON_BYTES) {
+      throw new Error("Lantern returned an invalid local response.");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (_error) {
+      throw new Error("Lantern returned an invalid local response.");
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Lantern returned an invalid local response.");
+    }
+    return parsed;
+  }
+
+  async function failureMessage(response, fallback) {
+    try {
+      const value = await readJson(response);
+      if (exactKeys(value, ["error"], []) && exactKeys(value.error, ["code", "message"], [])) {
+        return boundedText(value.error.message, 300, fallback);
+      }
+    } catch (_error) {
+      return fallback;
+    }
+    return fallback;
+  }
+
+  function stopSessionExpiryTimer() {
+    if (sessionExpiryTimer !== null) {
+      window.clearTimeout(sessionExpiryTimer);
+      sessionExpiryTimer = null;
+    }
+    sessionExpiresAt = 0;
+  }
+
+  function armSessionExpiry(expiresIn, generation) {
+    if (!Number.isInteger(expiresIn) || expiresIn < 1 || expiresIn > 3600) {
+      throw new Error("Lantern returned an invalid local session lifetime.");
+    }
+    if (!isCurrentSession(generation)) {
+      return;
+    }
+    stopSessionExpiryTimer();
+    const lifetimeMs = Math.max(1, expiresIn * 1000 - 1000);
+    sessionExpiresAt = performance.now() + lifetimeMs;
+
+    function expireWhenDue() {
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      const remaining = sessionExpiresAt - performance.now();
+      if (remaining > 0) {
+        sessionExpiryTimer = window.setTimeout(expireWhenDue, remaining);
+        return;
+      }
+      sessionExpiryTimer = null;
+      sessionExpiresAt = 0;
+      clearSession("The private local session expired. Launch Lantern again to continue.");
+    }
+
+    sessionExpiryTimer = window.setTimeout(expireWhenDue, lifetimeMs);
+  }
+
+  function clearSession(message, tone) {
+    sessionGeneration += 1;
+    const closeOpenDrawer = mobileDrawerQuery.matches && primarySidebar.classList.contains("is-open");
+    stopSessionExpiryTimer();
+    startInFlight = false;
+    cancelInFlight = false;
+    revokeInFlight = false;
+    pollInFlight = false;
+    authenticated = false;
+    csrfToken = null;
+    stopPolling();
+    newCheckButton.disabled = true;
+    setSessionActionsDisabled(true);
+    cancelButton.disabled = true;
+    connectionState.textContent = "Local session closed";
+    runAnnouncement.textContent = "";
+    showNotice(message, tone === "info" ? "info" : "attention");
+    statusSnapshot = null;
+    if (closeOpenDrawer) {
+      closeSidebar(true);
+    }
+    renderCurrentView();
+  }
+
+  function setSessionActionsDisabled(disabled) {
+    endSessionButton.disabled = disabled;
+    mobileEndSessionButton.disabled = disabled;
+  }
+
+  async function establishSession() {
+    let expectedGeneration = sessionGeneration;
+    try {
+      let response;
+      if (launchToken !== null) {
+        const exchangeBody = { launch_token: launchToken };
+        launchToken = null;
+        response = await apiFetch("/api/session/exchange", { method: "POST", body: exchangeBody });
+      } else {
+        response = await apiFetch("/api/session", { method: "GET" });
+      }
+      if (expectedGeneration !== sessionGeneration) {
+        return;
+      }
+
+      if (response.status === 401) {
+        clearSession("This local launch link is invalid, expired, or already used. Open Lantern again from its command-line launcher.");
+        return;
+      }
+      if (!response.ok) {
+        const message = await failureMessage(response, "Lantern could not open a private local session.");
+        if (expectedGeneration !== sessionGeneration) {
+          return;
+        }
+        clearSession(message);
+        return;
+      }
+      const sessionPayload = await readJson(response);
+      if (expectedGeneration !== sessionGeneration) {
+        return;
+      }
+      const session = validateSession(sessionPayload);
+      sessionGeneration += 1;
+      const activeGeneration = sessionGeneration;
+      expectedGeneration = activeGeneration;
+      csrfToken = session.csrf_token;
+      authenticated = true;
+      armSessionExpiry(session.expires_in, activeGeneration);
+      connectionState.textContent = "Private local session";
+      newCheckButton.disabled = false;
+      setSessionActionsDisabled(false);
+      hideNotice();
+      await pollStatus(false, activeGeneration);
+    } catch (_error) {
+      if (expectedGeneration !== sessionGeneration) {
+        return;
+      }
+      clearSession("Lantern could not connect to its local service. Close this tab and launch the interface again.");
+    }
+  }
+
+  async function refreshCsrfAfterForbidden(generation) {
+    requireCurrentSession(generation);
+    const response = await apiFetch("/api/session", { method: "GET" });
+    requireCurrentSession(generation);
+    if (response.status === 401) {
+      clearSession("The private local session expired. Launch Lantern again to continue.");
+      return false;
+    }
+    if (!response.ok) {
+      return false;
+    }
+    const sessionPayload = await readJson(response);
+    requireCurrentSession(generation);
+    const session = validateSession(sessionPayload);
+    requireCurrentSession(generation);
+    csrfToken = session.csrf_token;
+    armSessionExpiry(session.expires_in, generation);
+    return true;
+  }
+
+  async function postMutation(route, body, retryAfterRefresh, generation) {
+    requireCurrentSession(generation);
+    let response = await apiFetch(route, { method: "POST", body: body, csrf: true });
+    requireCurrentSession(generation);
+    if (response.status === 401) {
+      clearSession("The private local session expired. Launch Lantern again to continue.");
+      throw STALE_SESSION;
+    }
+    if (response.status === 403) {
+      const refreshed = await refreshCsrfAfterForbidden(generation);
+      requireCurrentSession(generation);
+      if (!refreshed) {
+        throw new Error("Lantern could not refresh local action verification.");
+      }
+      if (!retryAfterRefresh) {
+        throw new Error("Local action verification was refreshed. Select Start check again.");
+      }
+      response = await apiFetch(route, { method: "POST", body: body, csrf: true });
+      requireCurrentSession(generation);
+      if (response.status === 401) {
+        clearSession("The private local session expired. Launch Lantern again to continue.");
+        throw STALE_SESSION;
+      }
+    }
+    return response;
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) {
+      window.clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function schedulePoll(delay, continueOnError, generation) {
+    stopPolling();
+    if (isCurrentSession(generation)) {
+      pollTimer = window.setTimeout(function () {
+        void pollStatus(continueOnError, generation);
+      }, delay);
+    }
+  }
+
+  async function pollStatus(continueOnError, generation) {
+    if (!isCurrentSession(generation) || pollInFlight) {
+      return;
+    }
+    pollInFlight = true;
+    try {
+      const response = await apiFetch("/api/status", { method: "GET" });
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      if (response.status === 401) {
+        clearSession("The private local session expired. Launch Lantern again to continue.");
+        return;
+      }
+      if (!response.ok) {
+        const message = await failureMessage(response, "Lantern status is temporarily unavailable.");
+        if (!isCurrentSession(generation)) {
+          return;
+        }
+        showNotice(message, "attention");
+        if (continueOnError || (statusSnapshot && statusSnapshot.state === "running")) {
+          schedulePoll(POLL_IDLE_MS, false, generation);
+        }
+        return;
+      }
+      const statusPayload = await readJson(response);
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      const nextSnapshot = validateStatus(statusPayload);
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      const previousState = statusSnapshot ? statusSnapshot.state : null;
+      const changed = JSON.stringify(nextSnapshot) !== JSON.stringify(statusSnapshot);
+      statusSnapshot = nextSnapshot;
+      connectionState.textContent = statusSnapshot.state === "running" ? "Checking locally" : "Private local session";
+      hideNotice();
+      announceState(statusSnapshot.state, previousState);
+      if (changed) {
+        renderCurrentView();
+      }
+      if (statusSnapshot.state === "running") {
+        schedulePoll(POLL_RUNNING_MS, false, generation);
+      } else {
+        stopPolling();
+      }
+    } catch (_error) {
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      showNotice("Lantern could not read a safe local status snapshot. It will try the status route again.", "attention");
+      if (continueOnError || (statusSnapshot && statusSnapshot.state === "running")) {
+        schedulePoll(POLL_IDLE_MS, false, generation);
+      }
+    } finally {
+      if (isCurrentSession(generation)) {
+        pollInFlight = false;
+      }
+    }
+  }
+
+  function showNotice(message, tone) {
+    sessionNotice.className = "notice notice-" + tone;
+    sessionMessage.textContent = message;
+  }
+
+  function hideNotice() {
+    sessionNotice.className = "notice is-hidden";
+    sessionMessage.textContent = "";
+  }
+
+  function announceState(state, previousState) {
+    if (state === previousState) {
+      return;
+    }
+    const messages = {
+      ready: "Lantern is ready for a consent-based check.",
+      running: "The diagnostic check started.",
+      completed: "The diagnostic check completed.",
+      cancelled: "The diagnostic check was cancelled.",
+      failed: "The diagnostic check could not be completed.",
+    };
+    runAnnouncement.textContent = messages[state];
+  }
+
+  function createElement(tag, className, text) {
+    const element = document.createElement(tag);
     if (className) {
       element.className = className;
     }
-    if (text !== undefined && text !== null) {
-      element.textContent = String(text);
+    if (typeof text === "string") {
+      element.textContent = text;
     }
     return element;
   }
 
-  function makeIcon(name, className) {
-    const safeName = ICON_NAMES.has(name) ? name : "unknown";
+  function createIcon(name) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
-    svg.setAttribute("class", className || "icon");
+    svg.setAttribute("class", "icon");
     svg.setAttribute("aria-hidden", "true");
-    use.setAttribute("href", "icons.svg#" + safeName);
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", "icons.svg#" + name);
     svg.append(use);
     return svg;
   }
 
-  function append(parent) {
-    const children = Array.prototype.slice.call(arguments, 1);
-    children.flat().forEach(function (child) {
-      if (child !== null && child !== undefined) {
-        parent.append(child);
-      }
-    });
-    return parent;
-  }
-
-  function makeButton(label, className, handler, iconName) {
-    const button = makeElement("button", className);
-    button.type = "button";
-    if (iconName) {
-      button.append(makeIcon(iconName));
-    }
-    button.append(makeElement("span", "", label));
-    button.addEventListener("click", handler);
-    return button;
-  }
-
-  function statusBadge(status, label) {
-    const spec = STATUS[status] || STATUS.unknown;
-    const badge = makeElement("span", "status-badge status-" + (STATUS[status] ? status : "unknown"));
-    append(badge, makeIcon(spec.icon), makeElement("span", "", label || spec.label));
+  function statusBadge(status) {
+    const badge = createElement("span", "status-badge status-" + status);
+    badge.append(createIcon(STATUS_ICONS[status]), document.createTextNode(STATUS_LABELS[status]));
     return badge;
   }
 
-  function tag(text, status) {
-    return makeElement("span", "tag" + (status ? " status-" + status : ""), text);
+  function moduleCard(module) {
+    const button = createElement("button", "module-card status-card-" + module.status);
+    button.type = "button";
+    button.dataset.moduleTarget = module.id;
+    button.setAttribute("aria-label", module.label + ": " + STATUS_LABELS[module.status]);
+    const heading = createElement("div", "module-card-heading");
+    const mark = createElement("span", "module-mark");
+    mark.append(createIcon(MODULE_ICONS[module.id]));
+    heading.append(mark, createElement("h3", "", module.label), statusBadge(module.status));
+    button.append(heading, createElement("p", "module-detail", module.detail));
+    const action = createElement("span", "module-action", "View module");
+    action.append(createIcon("arrow-right"));
+    button.append(action);
+    return button;
   }
 
-  function panelHeader(title, description, action) {
-    const header = makeElement("header", "panel-header");
-    const copy = makeElement("div");
-    append(copy, makeElement("h2", "", title));
-    if (description) {
-      append(copy, makeElement("p", "", description));
+  function renderModules(title) {
+    const section = createElement("section", "section-block");
+    section.append(createElement("h2", "section-title", title));
+    const grid = createElement("div", "module-grid");
+    if (!statusSnapshot) {
+      grid.append(emptyPanel("No live module status is available until the local session connects."));
+    } else {
+      for (const module of statusSnapshot.modules) {
+        grid.append(moduleCard(module));
+      }
     }
-    append(header, copy);
-    if (action) {
-      append(header, action);
-    }
-    return header;
+    section.append(grid);
+    return section;
   }
 
-  function sectionLink(label, target) {
-    return makeButton(label, "section-link", function () {
-      navigate(target, true);
-    }, "chevron-right");
+  function emptyPanel(message) {
+    const panel = createElement("section", "panel empty-state");
+    panel.append(createIcon("unknown"), createElement("p", "", message));
+    return panel;
   }
 
-  function setPageMeta(view) {
-    const meta = PAGE_META[view] || PAGE_META.overview;
-    elements.pageEyebrow.textContent = meta.eyebrow;
-    elements.pageTitle.textContent = meta.title;
-    elements.pageDescription.textContent = meta.description;
-    document.title = meta.title + " · Lantern";
+  function summaryPanel() {
+    if (!statusSnapshot) {
+      const panel = createElement("section", "panel connection-panel");
+      panel.append(createIcon("lock"), createElement("h2", "", "No authenticated local status"));
+      panel.append(createElement("p", "", "Launch Lantern again if this tab no longer has a private local session."));
+      return panel;
+    }
+    const panel = createElement("section", "summary-panel tone-" + statusSnapshot.summary.tone);
+    const copy = createElement("div", "summary-copy");
+    copy.append(createElement("p", "eyebrow", statusSnapshot.state === "running" ? "Check in progress" : "Current assessment"));
+    copy.append(createElement("h2", "", statusSnapshot.summary.headline));
+    copy.append(createElement("p", "", statusSnapshot.summary.detail));
+    panel.append(copy);
+    const shield = createElement("span", "summary-mark");
+    shield.append(createIcon(statusSnapshot.summary.tone === "positive" ? "shield-check" : "shield"));
+    panel.append(shield);
+    return panel;
   }
 
-  function setPageActions(view) {
-    elements.pageActions.replaceChildren();
+  function choiceRow(name, value, title, detail) {
+    const label = createElement("label", "choice-card");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = value;
+    input.checked = draftGoal === value;
+    const copy = createElement("span", "choice-copy");
+    copy.append(createElement("strong", "", title), createElement("small", "", detail));
+    label.append(input, copy);
+    return label;
+  }
 
-    const readOnly = statusBadge("healthy", "Read-only");
-    readOnly.title = "No configuration-changing action is connected";
+  function renderStartPanel() {
+    const panel = createElement("section", "panel start-panel");
+    const intro = createElement("div", "panel-heading");
+    intro.append(createElement("p", "eyebrow", "Consent for one run"));
+    intro.append(createElement("h2", "", "Choose the smallest useful check"));
+    intro.append(createElement("p", "", "Passive is the default. Nothing starts automatically, and this interface cannot change settings."));
+    panel.append(intro);
 
-    if (["overview", "device", "network", "route", "wifi", "dns", "lan", "mdns", "ports"].includes(view)) {
-      const retry = makeButton("Run again", "secondary-button", openOnboarding, "refresh");
-      append(elements.pageActions, readOnly, retry);
-      return;
+    const form = document.createElement("form");
+    form.id = "start-check-form";
+    const goals = document.createElement("fieldset");
+    goals.className = "choice-fieldset";
+    goals.append(createElement("legend", "", "What needs help?"));
+    goals.append(
+      choiceRow("goal", "problem", "Something is not working", "Check the local network path and explain what is confirmed."),
+      choiceRow("goal", "network", "Evaluate this network", "Focus the explanation on network viability."),
+      choiceRow("goal", "rescue", "Gather network context for recovery", "Network viability only—not boot, hardware, storage, encryption, or recoverability."),
+    );
+    form.append(goals);
+
+    const passive = createElement("div", "consent-fact");
+    passive.append(createIcon("eye"));
+    const passiveCopy = createElement("span", "");
+    passiveCopy.append(createElement("strong", "", "Passive local state · default"));
+    passiveCopy.append(createElement("small", "", "Reads local route, interface, Wi-Fi, and neighbor state. It sends no diagnostic packets."));
+    passive.append(passiveCopy);
+    form.append(passive);
+
+    const basicLabel = createElement("label", "consent-row");
+    const basicInput = document.createElement("input");
+    basicInput.type = "checkbox";
+    basicInput.id = "basic-network-checks";
+    basicInput.checked = draftBasic;
+    const basicCopy = createElement("span", "");
+    basicCopy.append(createElement("strong", "", "Include basic network checks"));
+    basicCopy.append(createElement("small", "", "Sends small public reachability probes (ping/ICMP and TCP), DNS queries, and gateway service-port probes. It does not sweep the LAN or change settings."));
+    basicLabel.append(basicInput, basicCopy);
+    form.append(basicLabel);
+
+    const mdnsLabel = createElement("label", "consent-row consent-row-nested");
+    const mdnsInput = document.createElement("input");
+    mdnsInput.type = "checkbox";
+    mdnsInput.id = "include-mdns";
+    mdnsInput.checked = draftMdns;
+    mdnsInput.disabled = !draftBasic;
+    const mdnsCopy = createElement("span", "");
+    mdnsCopy.append(createElement("strong", "", "Include a brief local mDNS browse"));
+    mdnsCopy.append(createElement("small", "", "Off by default. When selected, it briefly sends and receives local multicast service-discovery traffic."));
+    mdnsLabel.append(mdnsInput, mdnsCopy);
+    form.append(mdnsLabel);
+
+    const warning = createElement("div", "credential-warning");
+    warning.append(createIcon("key"), createElement("p", "", "Lantern will not ask for credentials here. Do not enter passwords, recovery keys, or other secrets into this interface."));
+    form.append(warning);
+
+    const submit = createElement("button", "primary-button", startInFlight ? "Starting…" : "Start check");
+    submit.type = "submit";
+    submit.disabled = !authenticated || !statusSnapshot || startInFlight || statusSnapshot.state === "running";
+    submit.prepend(createIcon("scan"));
+    form.append(submit);
+    panel.append(form);
+    return panel;
+  }
+
+  function capabilityPanel() {
+    const panel = createElement("section", "panel capability-panel");
+    panel.append(createElement("p", "eyebrow", "Boundaries"), createElement("h2", "", "What this live slice can—and cannot—do"));
+    const grid = createElement("div", "capability-grid");
+    const items = [
+      ["passive_scan", "Read passive state", "Local configuration and operating-system observations."],
+      ["low_impact_network", "Run basic network checks", "Only after the checkbox is selected for that run."],
+      ["active_discovery", "Sweep the LAN", "Active discovery is not exposed in this interface."],
+      ["remediation", "Apply fixes", "No remediation API or fix handler is connected."],
+      ["credentials", "Collect credentials", "There are no credential fields or credential transport."],
+      ["lan_remote", "Open remote access", "No LAN listener or remote session is enabled."],
+      ["share_export", "Export or share", "No report export or external sharing route is connected."],
+    ];
+    for (const item of items) {
+      const available = Boolean(statusSnapshot && statusSnapshot.capabilities[item[0]]);
+      const card = createElement("div", "capability-item");
+      card.append(createIcon(available ? "check" : "lock"));
+      const copy = createElement("span", "");
+      copy.append(createElement("strong", "", item[1]), createElement("small", "", item[2]));
+      card.append(copy);
+      grid.append(card);
     }
-
-    if (view === "session") {
-      append(elements.pageActions, statusBadge("unknown", "Session inactive"));
-      return;
-    }
-
-    if (view === "rescue") {
-      append(elements.pageActions, statusBadge("info", "Guided assessment"));
-      return;
-    }
-
-    append(elements.pageActions, readOnly);
+    panel.append(grid);
+    return panel;
   }
 
   function renderOverview() {
     const fragment = document.createDocumentFragment();
-
-    const hero = makeElement("section", "assessment-hero");
-    hero.setAttribute("aria-labelledby", "assessment-title");
-    const copy = makeElement("div", "assessment-copy");
-    const heroBadge = statusBadge(DEMO_FIXTURE.assessment.status);
-    const title = makeElement("h2", "", DEMO_FIXTURE.assessment.title);
-    title.id = "assessment-title";
-    const summary = makeElement("p", "", DEMO_FIXTURE.assessment.summary);
-    const actions = makeElement("div", "assessment-actions");
-    append(
-      actions,
-      makeButton("Review suggested fix", "primary-button", function () { navigate("fixes", true); }, "wrench"),
-      makeButton("View DNS evidence", "secondary-button", function () { navigate("dns", true); }, "dns")
-    );
-    append(copy, heroBadge, title, summary, actions);
-
-    const facts = makeElement("div", "assessment-facts");
-    [
-      { icon: "shield-check", label: DEMO_FIXTURE.assessment.confidence, value: "Three layers corroborate the path" },
-      { icon: "network", label: DEMO_FIXTURE.assessment.scope, value: "Not a total network outage" },
-      { icon: "clock", label: DEMO_FIXTURE.meta.duration, value: DEMO_FIXTURE.meta.started },
-    ].forEach(function (fact) {
-      const row = makeElement("div", "fact-row");
-      const body = makeElement("div");
-      append(body, makeElement("strong", "", fact.label), makeElement("span", "", fact.value));
-      append(row, makeIcon(fact.icon), body);
-      facts.append(row);
-    });
-    append(hero, copy, facts);
-    fragment.append(hero);
-
-    fragment.append(renderPathPanel());
-
-    const grid = makeElement("div", "content-grid");
-    const issuePanel = makeElement("section", "panel");
-    issuePanel.setAttribute("aria-labelledby", "priority-title");
-    const issueHeader = panelHeader("What deserves attention", "Prioritized by likely impact and supporting evidence.");
-    issueHeader.querySelector("h2").id = "priority-title";
-    const issueStack = makeElement("div", "card-stack");
-    DEMO_FIXTURE.issues.forEach(function (issue) {
-      issueStack.append(renderIssue(issue));
-    });
-    append(issuePanel, issueHeader, issueStack);
-
-    const side = makeElement("div", "content-stack");
-    const workingPanel = makeElement("section", "panel");
-    workingPanel.setAttribute("aria-labelledby", "working-title");
-    const workingHeader = panelHeader("What is working", "Evidence that narrows the search.");
-    workingHeader.querySelector("h2").id = "working-title";
-    const workingList = makeElement("ul", "working-list");
-    DEMO_FIXTURE.working.forEach(function (item) {
-      const row = makeElement("li");
-      const text = makeElement("div");
-      append(text, makeElement("strong", "", item.title), makeElement("span", "", item.detail));
-      append(row, makeIcon("check"), text);
-      workingList.append(row);
-    });
-    append(workingPanel, workingHeader, workingList);
-
-    const accessPanel = makeElement("section", "panel");
-    accessPanel.setAttribute("aria-labelledby", "access-summary-title");
-    const accessHeader = panelHeader(
-      "Access, if needed",
-      "Lantern lists prerequisites without collecting secrets.",
-      sectionLink("See fixes", "fixes")
-    );
-    accessHeader.querySelector("h2").id = "access-summary-title";
-    const access = DEMO_FIXTURE.access[0];
-    const accessCard = makeElement("div", "access-card");
-    const accessMark = makeElement("span", "access-mark");
-    accessMark.append(makeIcon("key"));
-    const accessBody = makeElement("div");
-    append(
-      accessBody,
-      makeElement("h3", "", access.title),
-      makeElement("p", "", access.reason),
-      makeElement("small", "", access.status + " · " + access.where)
-    );
-    append(accessCard, accessMark, accessBody);
-    append(accessPanel, accessHeader, accessCard);
-    append(side, workingPanel, accessPanel);
-    append(grid, issuePanel, side);
-    fragment.append(grid);
-
+    fragment.append(summaryPanel());
+    if (!statusSnapshot || statusSnapshot.state !== "running") {
+      fragment.append(renderStartPanel());
+    }
+    fragment.append(renderModules("Module coverage"), capabilityPanel());
     return fragment;
-  }
-
-  function renderPathPanel() {
-    const panel = makeElement("section", "panel path-panel");
-    panel.setAttribute("aria-labelledby", "lantern-path-title");
-    const header = panelHeader("The Lantern Path", "Select a layer to see the observation, interpretation, and source evidence.");
-    header.querySelector("h2").id = "lantern-path-title";
-    const list = makeElement("ol", "lantern-path");
-    DEMO_FIXTURE.path.forEach(function (pathItem) {
-      const row = makeElement("li", "path-node status-" + pathItem.status);
-      const button = makeElement("button", "path-node-button");
-      button.type = "button";
-      button.setAttribute("aria-label", pathItem.label + ": " + pathItem.detail + ". Open details.");
-      button.addEventListener("click", function () { navigate(pathItem.target, true); });
-      const mark = makeElement("span", "path-icon");
-      mark.append(makeIcon(pathItem.icon));
-      append(button, mark, makeElement("strong", "", pathItem.label), makeElement("small", "", pathItem.detail));
-      row.append(button);
-      list.append(row);
-    });
-    append(panel, header, list);
-    return panel;
-  }
-
-  function renderIssue(issue) {
-    const card = makeElement("article", "issue-card status-" + issue.status);
-    const mark = makeElement("span", "issue-mark");
-    mark.append(makeIcon(STATUS[issue.status] ? STATUS[issue.status].icon : "unknown"));
-    const copy = makeElement("div");
-    append(copy, tag(issue.code, issue.status), makeElement("h3", "", issue.title), makeElement("p", "", issue.detail));
-    append(card, mark, copy, sectionLink("Evidence", issue.target));
-    return card;
   }
 
   function renderDevice() {
     const fragment = document.createDocumentFragment();
-    const summaryPanel = makeElement("section", "panel");
-    summaryPanel.setAttribute("aria-labelledby", "device-summary-title");
-    const summary = makeElement("div", "device-summary");
-    const orb = makeElement("span", "device-orb");
-    orb.append(makeIcon("device"));
-    const copy = makeElement("div");
-    const title = makeElement("h2", "", "Demo device");
-    title.id = "device-summary-title";
-    append(
-      copy,
-      title,
-      makeElement("p", "", "Lantern currently confirms platform context and network behavior. Hardware, storage, and service health remain explicit capability gaps."),
-      tag(DEMO_FIXTURE.meta.platform, "info")
-    );
-    append(summary, orb, copy);
-
-    const capabilities = makeElement("div", "capability-list");
-    [
-      { title: "Platform context", detail: "Operating system and architecture", status: "healthy", label: "Available" },
-      { title: "Network adapters", detail: "Route, Wi-Fi, DNS, LAN, and services", status: "healthy", label: "Available" },
-      { title: "Hardware health", detail: "Firmware diagnostics and memory", status: "unknown", label: "Not supported yet" },
-      { title: "Storage health", detail: "Disk visibility, SMART, and filesystem", status: "unknown", label: "Not supported yet" },
-      { title: "Operating-system services", detail: "Service and driver evidence", status: "unknown", label: "Designed" },
-      { title: "Automatic remediation", detail: "Preview, verify, and rollback engine", status: "blocked", label: "Not connected" },
-    ].forEach(function (capability) {
-      const row = makeElement("div", "capability-row");
-      const body = makeElement("span");
-      append(body, makeElement("strong", "", capability.title), makeElement("small", "", capability.detail));
-      append(row, body, makeElement("span", "capability-badge status-" + capability.status, capability.label));
-      capabilities.append(row);
-    });
-
-    append(summaryPanel, summary, capabilities);
-    fragment.append(summaryPanel);
-
-    const callout = makeElement("section", "callout status-attention");
-    callout.setAttribute("aria-labelledby", "device-boundary-title");
-    const calloutCopy = makeElement("div");
-    const calloutTitle = makeElement("h3", "", "An honest unknown is safer than a false pass");
-    calloutTitle.id = "device-boundary-title";
-    append(calloutCopy, calloutTitle, makeElement("p", "", "This preview does not call unimplemented collectors healthy. Each capability becomes available only after its platform adapter and real-device evidence pass review."));
-    append(callout, makeIcon("info"), calloutCopy);
-    fragment.append(callout);
+    fragment.append(summaryPanel());
+    const panel = createElement("section", "panel explanation-panel");
+    panel.append(createIcon("device"), createElement("h2", "", "Network-facing device context"));
+    panel.append(createElement("p", "", "This diagnostic may observe local interface, routing, Wi-Fi, and neighbor-table state. It does not claim to evaluate processor, memory, battery, storage, operating-system integrity, or general hardware health."));
+    fragment.append(panel);
     return fragment;
   }
 
   function renderNetwork() {
     const fragment = document.createDocumentFragment();
-    fragment.append(renderPathPanel());
-
-    const header = makeElement("div", "panel-header");
-    const copy = makeElement("div");
-    append(copy, makeElement("h2", "", "Network modules"), makeElement("p", "", "Every layer keeps its own evidence and failure state."));
-    append(header, copy, tag("Passive scope", "healthy"));
-    fragment.append(header);
-
-    const grid = makeElement("section", "module-grid");
-    grid.setAttribute("aria-label", "Network diagnostic modules");
-    Object.keys(DEMO_FIXTURE.modules).forEach(function (moduleId) {
-      grid.append(renderModuleCard(moduleId, DEMO_FIXTURE.modules[moduleId]));
-    });
-    fragment.append(grid);
-
-    const callout = makeElement("section", "callout");
-    callout.setAttribute("aria-labelledby", "network-scope-title");
-    const body = makeElement("div");
-    const title = makeElement("h3", "", "Active discovery remains off");
-    title.id = "network-scope-title";
-    append(body, title, makeElement("p", "", "This demonstration uses passive local evidence. A real active scan will show the exact interface, network, and host limit before it sends traffic."));
-    append(callout, makeIcon("shield"), body);
-    fragment.append(callout);
+    fragment.append(summaryPanel(), renderModules("From local link to name resolution"));
+    const note = createElement("section", "panel explanation-panel");
+    note.append(createIcon("shield"), createElement("h2", "", "The profile is the boundary"));
+    note.append(createElement("p", "", "Passive reads local state without diagnostic packets. Basic network checks add only the bounded traffic described before you start. Neither profile performs an active LAN sweep."));
+    fragment.append(note);
     return fragment;
-  }
-
-  function renderModuleCard(moduleId, moduleData) {
-    const card = makeElement("button", "module-card status-" + moduleData.status);
-    card.type = "button";
-    card.setAttribute("aria-label", moduleData.title + ": " + moduleData.summary + ". Open evidence.");
-    card.addEventListener("click", function () { navigate(moduleId, true); });
-    const top = makeElement("div", "module-card-top");
-    const mark = makeElement("span", "module-mark");
-    mark.append(makeIcon(moduleData.icon));
-    append(top, mark, statusBadge(moduleData.status));
-    const foot = makeElement("div", "module-card-foot");
-    append(foot, makeIcon("clock"), makeElement("span", "", moduleData.state === "complete" ? "Checked in this run" : stateLabel(moduleData.state)));
-    append(card, top, makeElement("h3", "", moduleData.title), makeElement("p", "", moduleData.summary), foot);
-    return card;
-  }
-
-  function stateLabel(state) {
-    const labels = {
-      partial: "Partial evidence",
-      error: "Could not complete",
-      unsupported: "Not tested",
-      complete: "Complete",
-    };
-    return labels[state] || "Unknown";
   }
 
   function renderModule(moduleId) {
-    const moduleData = DEMO_FIXTURE.modules[moduleId];
-    if (!moduleData) {
-      return renderUnknownView();
+    if (!statusSnapshot) {
+      return emptyPanel("No authenticated module status is available.");
+    }
+    const module = statusSnapshot.modules.find((item) => item.id === moduleId);
+    if (!module) {
+      return emptyPanel("This module is unavailable in the current status contract.");
     }
     const fragment = document.createDocumentFragment();
-
-    const hero = makeElement("section", "module-hero status-" + moduleData.status);
-    const mark = makeElement("span", "module-mark");
-    mark.append(makeIcon(moduleData.icon));
-    const body = makeElement("div");
-    append(body, makeElement("h2", "", moduleData.summary), makeElement("p", "", "Observed " + DEMO_FIXTURE.meta.started + " · " + stateLabel(moduleData.state)));
-    append(hero, mark, body, statusBadge(moduleData.status));
-    fragment.append(hero);
-
-    if (moduleData.state === "unsupported") {
-      fragment.append(renderStatePanel(
-        "unsupported-state",
-        "unknown",
-        "This check did not run",
-        moduleData.next,
-        "Return to network",
-        function () { navigate("network", true); }
-      ));
-      fragment.append(renderWhyPanel(moduleData));
-      return fragment;
+    const panel = createElement("section", "panel module-focus status-card-" + module.status);
+    const heading = createElement("div", "module-focus-heading");
+    const mark = createElement("span", "module-mark module-mark-large");
+    mark.append(createIcon(MODULE_ICONS[module.id]));
+    heading.append(mark, createElement("h2", "", module.label), statusBadge(module.status));
+    panel.append(heading, createElement("p", "module-focus-detail", module.detail));
+    const truth = createElement("div", "truth-row");
+    truth.append(createIcon("info"), createElement("p", "", "This is the bounded presentation returned by Lantern. Raw addresses, device identifiers, evidence payloads, and credentials are not sent to this page."));
+    panel.append(truth);
+    fragment.append(panel);
+    if (module.status === "unavailable" || module.status === "limited" || module.status === "not_started" || module.status === "not_run" || module.status === "cancelled") {
+      const state = createElement("section", "panel unsupported-state");
+      state.append(createIcon(module.status === "unavailable" ? "lock" : "unknown"));
+      state.append(createElement("h2", "", "No stronger conclusion is available"));
+      state.append(createElement("p", "", "Lantern preserves unsupported, partial, blocked, and not-run states instead of presenting missing evidence as healthy."));
+      fragment.append(state);
     }
-
-    if (moduleData.state === "error") {
-      fragment.append(renderStatePanel(
-        "error-state",
-        "critical",
-        "This module could not complete",
-        "The error is isolated. Route, Wi-Fi, DNS, and LAN evidence remain available.",
-        "Simulate retry",
-        function () { showToast("Retry is demonstrated only; no native tool was called.", "info"); }
-      ));
-    }
-
-    if (moduleData.metrics.length) {
-      const metrics = makeElement("dl", "metric-grid");
-      moduleData.metrics.forEach(function (metric) {
-        const tile = makeElement("div", "metric-tile");
-        append(tile, makeElement("dt", "", metric.label), makeElement("dd", "", metric.value));
-        metrics.append(tile);
-      });
-      fragment.append(metrics);
-    }
-
-    const evidencePanel = makeElement("section", "panel");
-    evidencePanel.setAttribute("aria-labelledby", moduleId + "-evidence-title");
-    const evidenceHeader = panelHeader("Evidence", "Observed values stay separate from interpretation.", tag("Synthetic fixture", "info"));
-    evidenceHeader.querySelector("h2").id = moduleId + "-evidence-title";
-    const evidenceList = makeElement("dl", "evidence-list");
-    moduleData.evidence.forEach(function (evidence) {
-      const row = makeElement("div", "evidence-row");
-      append(
-        row,
-        makeElement("dt", "", evidence.label),
-        makeElement("dd", "", evidence.value),
-        makeElement("span", "evidence-source", evidence.source)
-      );
-      evidenceList.append(row);
-    });
-
-    const details = makeElement("details", "technical-details");
-    append(
-      details,
-      makeElement("summary", "", "Technical evidence · share-safe fixture"),
-      makeElement("pre", "code-block", JSON.stringify({ module: moduleId, status: moduleData.status, state: moduleData.state, evidence: moduleData.evidence }, null, 2))
-    );
-    append(evidencePanel, evidenceHeader, evidenceList, details);
-    fragment.append(evidencePanel);
-    fragment.append(renderWhyPanel(moduleData));
     return fragment;
   }
 
-  function renderWhyPanel(moduleData) {
-    const panel = makeElement("section", "panel");
-    panel.setAttribute("aria-labelledby", "why-this-matters-title");
-    const header = panelHeader("Why this matters", moduleData.why);
-    header.querySelector("h2").id = "why-this-matters-title";
-    const callout = makeElement("div", "callout" + (moduleData.status === "attention" ? " status-attention" : ""));
-    const body = makeElement("div");
-    append(body, makeElement("h3", "", "Safest next step"), makeElement("p", "", moduleData.next));
-    append(callout, makeIcon("arrow-right"), body);
-    append(panel, header, callout);
-    return panel;
-  }
-
-  function renderStatePanel(className, status, titleText, detail, buttonText, handler) {
-    const section = makeElement("section", className);
-    const body = makeElement("div", "state-content");
-    const mark = makeElement("span", "state-mark status-" + status);
-    mark.append(makeIcon(STATUS[status] ? STATUS[status].icon : "unknown"));
-    append(body, mark, makeElement("h2", "", titleText), makeElement("p", "", detail), makeButton(buttonText, "secondary-button", handler, "refresh"));
-    section.append(body);
-    return section;
+  function unavailablePanel(iconName, title, detail, points) {
+    const fragment = document.createDocumentFragment();
+    const panel = createElement("section", "panel unavailable-panel");
+    const mark = createElement("span", "unavailable-mark");
+    mark.append(createIcon(iconName));
+    panel.append(mark, createElement("p", "eyebrow", "Not connected"), createElement("h2", "", title), createElement("p", "", detail));
+    const list = document.createElement("ul");
+    for (const point of points) {
+      list.append(createElement("li", "", point));
+    }
+    panel.append(list);
+    fragment.append(panel);
+    return fragment;
   }
 
   function renderFixes() {
-    const fragment = document.createDocumentFragment();
-    const callout = makeElement("section", "callout");
-    callout.setAttribute("aria-labelledby", "fix-safety-title");
-    const calloutBody = makeElement("div");
-    const calloutTitle = makeElement("h3", "", "Suggestions never run automatically");
-    calloutTitle.id = "fix-safety-title";
-    append(calloutBody, calloutTitle, makeElement("p", "", "A real fix must preview the exact change, request access only when needed, verify the result, and preserve rollback evidence. This shell simulates that lifecycle without calling the computer."));
-    append(callout, makeIcon("shield-check"), calloutBody);
-    fragment.append(callout);
-
-    const section = makeElement("section", "panel");
-    section.setAttribute("aria-labelledby", "available-fixes-title");
-    const header = panelHeader("Available plans", "One low-risk demonstration and one guided prerequisite.");
-    header.querySelector("h2").id = "available-fixes-title";
-    const stack = makeElement("div", "card-stack");
-
-    const fix = makeElement("article", "fix-card");
-    const fixMark = makeElement("span", "issue-mark");
-    fixMark.append(makeIcon("dns"));
-    const fixBody = makeElement("div");
-    const meta = makeElement("div", "fix-meta");
-    append(meta, tag("Low risk and reversible", "healthy"), tag("May request admin", "blocked"), tag("Under 10 seconds", "info"));
-    append(
-      fixBody,
-      makeElement("h3", "", "Refresh the local DNS cache"),
-      makeElement("p", "", "May help only if the inconsistent answer is stale. It will not change the configured resolver."),
-      meta
+    return unavailablePanel(
+      "wrench",
+      "Fixes are unavailable",
+      "This interface can diagnose and explain, but it cannot preview, approve, apply, or roll back a change.",
+      ["No remediation handlers are connected.", "No administrator credentials can be entered.", "A diagnostic result never applies a change automatically."],
     );
-    append(fix, fixMark, fixBody, makeButton("Preview", "primary-button", openFixPreview, "chevron-right"));
-
-    const guided = makeElement("article", "fix-card");
-    const guidedMark = makeElement("span", "access-mark");
-    guidedMark.append(makeIcon("key"));
-    const guidedBody = makeElement("div");
-    const guidedMeta = makeElement("div", "fix-meta");
-    append(guidedMeta, tag("Guided only", "blocked"), tag("DNS administrator", "blocked"));
-    append(
-      guidedBody,
-      makeElement("h3", "", "Confirm the DNS filtering policy"),
-      makeElement("p", "", "The different answer may be intentional. Review the DNS service before proposing a configuration change."),
-      guidedMeta
-    );
-    const guidedButton = makeButton("View access", "secondary-button", function () {
-      showToast("Access details are listed below. Lantern never asks for the password.", "info");
-    }, "key");
-    append(guided, guidedMark, guidedBody, guidedButton);
-    append(stack, fix, guided);
-    append(section, header, stack);
-    fragment.append(section);
-
-    const accessSection = makeElement("section", "panel");
-    accessSection.setAttribute("aria-labelledby", "access-needed-title");
-    const accessHeader = panelHeader("Access prerequisites", "What may be needed, why, and where authorization occurs.");
-    accessHeader.querySelector("h2").id = "access-needed-title";
-    const accessStack = makeElement("div", "card-stack");
-    DEMO_FIXTURE.access.forEach(function (access) {
-      const card = makeElement("article", "access-card");
-      const mark = makeElement("span", "access-mark");
-      mark.append(makeIcon("key"));
-      const body = makeElement("div");
-      append(body, makeElement("h3", "", access.title), makeElement("p", "", access.reason), makeElement("small", "", access.where), tag(access.status, "blocked"));
-      append(card, mark, body);
-      accessStack.append(card);
-    });
-    append(accessSection, accessHeader, accessStack);
-    fragment.append(accessSection);
-    return fragment;
   }
 
-  function renderShare() {
-    const fragment = document.createDocumentFragment();
-    const privacyCallout = makeElement("section", "callout");
-    privacyCallout.setAttribute("aria-labelledby", "share-privacy-title");
-    const calloutBody = makeElement("div");
-    const calloutTitle = makeElement("h3", "", "Share-safe by default");
-    calloutTitle.id = "share-privacy-title";
-    append(calloutBody, calloutTitle, makeElement("p", "", "Hostnames, Wi-Fi names, service instances, BSSIDs, and hardware addresses are removed structurally. Local network addresses remain because they are often essential to diagnosis."));
-    append(privacyCallout, makeIcon("lock"), calloutBody);
-    fragment.append(privacyCallout);
-
-    const grid = makeElement("div", "share-grid");
-    const human = makeElement("section", "share-option");
-    human.setAttribute("aria-labelledby", "human-report-title");
-    const humanHeader = makeElement("div", "share-option-header");
-    const humanMark = makeElement("span", "module-mark");
-    humanMark.append(makeIcon("share"));
-    const humanCopy = makeElement("div");
-    const humanTitle = makeElement("h2", "", "Plain-language summary");
-    humanTitle.id = "human-report-title";
-    append(humanCopy, humanTitle, makeElement("p", "", "Best for a message or support call."));
-    append(humanHeader, humanMark, humanCopy);
-    append(
-      human,
-      humanHeader,
-      makeElement("p", "", "Includes the top assessment, supporting evidence, what could not be tested, and prioritized next steps."),
-      makeButton("Preview redacted summary", "secondary-button", toggleSharePreview, "eye")
+  function renderRescue() {
+    const fragment = unavailablePanel(
+      "rescue",
+      "Rescue is guidance only",
+      "A network run can provide network viability context. It cannot determine whether this computer is bootable or recoverable.",
+      [
+        "This live slice does not assess boot viability or operating-system integrity.",
+        "It does not assess hardware, storage health, encryption, backup state, or data recoverability.",
+        "Never interpret a healthy network module as a healthy or recoverable computer.",
+      ],
     );
-
-    const machine = makeElement("section", "share-option");
-    machine.setAttribute("aria-labelledby", "machine-report-title");
-    const machineHeader = makeElement("div", "share-option-header");
-    const machineMark = makeElement("span", "module-mark");
-    machineMark.append(makeIcon("download"));
-    const machineCopy = makeElement("div");
-    const machineTitle = makeElement("h2", "", "Structured report");
-    machineTitle.id = "machine-report-title";
-    append(machineCopy, machineTitle, makeElement("p", "", "Versioned JSON for tools and deeper review."));
-    append(machineHeader, machineMark, machineCopy);
-    const disabledDownload = makeButton("Export when connected", "secondary-button", function () {
-      showToast("Export is intentionally disconnected in this interface fixture.", "info");
-    }, "download");
-    append(
-      machine,
-      machineHeader,
-      makeElement("p", "", "Carries finding codes, status, evidence, source, timestamps, and capability gaps without credentials."),
-      disabledDownload
-    );
-    append(grid, human, machine);
-    fragment.append(grid);
-
-    const preview = makeElement("section", "panel" + (appState.sharePreview ? "" : " is-hidden"));
-    preview.setAttribute("aria-labelledby", "redaction-preview-title");
-    const previewHeader = panelHeader("Redaction preview", "Synthetic report preview—no computer data is present.", tag("Safe to demonstrate", "healthy"));
-    previewHeader.querySelector("h2").id = "redaction-preview-title";
-    const privacy = makeElement("dl", "privacy-preview");
-    [
-      { label: "Computer name", value: "Removed" },
-      { label: "Wi-Fi name", value: "Removed" },
-      { label: "MAC addresses", value: "Removed" },
-      { label: "Local IP addresses", value: "Retained" },
-    ].forEach(function (item) {
-      const row = makeElement("div");
-      append(row, makeElement("dt", "", item.label), makeElement("dd", "", item.value));
-      privacy.append(row);
-    });
-    append(
-      preview,
-      previewHeader,
-      privacy,
-      makeElement("pre", "code-block", "Overall: NEEDS ATTENTION\nInternet path: Working\nDNS: Resolver answers differ\nDevice identifiers: <redacted>\nGateway: 192.168.0.1\nNext step: Confirm expected DNS filtering policy")
-    );
-    fragment.append(preview);
+    const safety = createElement("section", "panel safety-panel");
+    safety.append(createIcon("shield"), createElement("h2", "", "Protect data before repair"));
+    safety.append(createElement("p", "", "If a computer may have storage or hardware trouble, stop write-heavy experimentation and seek qualified recovery help. Lantern does not unlock disks, request recovery keys, or change boot state."));
+    fragment.append(safety);
     return fragment;
   }
 
   function renderSession() {
-    const fragment = document.createDocumentFragment();
-    const callout = makeElement("section", "callout status-attention");
-    callout.setAttribute("aria-labelledby", "session-boundary-title");
-    const calloutBody = makeElement("div");
-    const calloutTitle = makeElement("h3", "", "Read-only network view—not remote control");
-    calloutTitle.id = "session-boundary-title";
-    append(calloutBody, calloutTitle, makeElement("p", "", "A paired person can view scoped network evidence. They cannot browse files, run commands, collect credentials, inspect another endpoint, or apply a fix."));
-    append(callout, makeIcon("shield"), calloutBody);
-    fragment.append(callout);
-
-    const grid = makeElement("div", "session-hero");
-    const setup = makeElement("section", "panel");
-    setup.setAttribute("aria-labelledby", "session-setup-title");
-    const setupHeader = panelHeader("Start a temporary session", "Every session begins with visible approval on this device.", statusBadge("unknown", "Inactive"));
-    setupHeader.querySelector("h2").id = "session-setup-title";
-
-    const facts = makeElement("dl", "session-facts");
-    [
-      { label: "Interface", value: "Would bind only the confirmed private interface" },
-      { label: "Scope", value: "Redacted network report · read-only" },
-      { label: "Expiry", value: "15 minutes by default" },
-      { label: "Transport", value: "HTTPS and verified development fingerprint required" },
-      { label: "Active probes", value: "Off until separately approved" },
-    ].forEach(function (item) {
-      const row = makeElement("div");
-      append(row, makeElement("dt", "", item.label), makeElement("dd", "", item.value));
-      facts.append(row);
-    });
-    const startButton = makeButton("Start when secure service is connected", "primary-button", function () {
-      showToast("The LAN server is not connected to this design fixture.", "info");
-    }, "session");
-    startButton.setAttribute("aria-describedby", "session-demo-note");
-    append(setup, setupHeader, facts, startButton, makeElement("p", "demo-notice", "No listener, certificate, pairing secret, or network route exists in this static shell."));
-    setup.lastElementChild.id = "session-demo-note";
-
-    const identity = makeElement("section", "session-identity");
-    identity.setAttribute("aria-labelledby", "pairing-title");
-    append(
-      identity,
-      makeElement("p", "eyebrow", "Pairing preview"),
-      makeElement("h2", "", "One-time host code")
-    );
-    identity.querySelector("h2").id = "pairing-title";
-    const code = makeElement("div", "session-code", "•••• ••••");
-    code.setAttribute("aria-label", "Pairing code unavailable because the session is inactive");
-    code.setAttribute("aria-disabled", "true");
-    const identityBody = makeElement("p", "session-note", "A real code is single-use, rate-limited, short-lived, and shown only after the host confirms the interface and expiry.");
-    const verify = makeElement("p", "session-note session-note-last", "Both people verify the host identity and temporary certificate fingerprint before viewing a report.");
-    append(identity, code, identityBody, verify);
-    append(grid, setup, identity);
-    fragment.append(grid);
-
-    const lifecycle = makeElement("section", "panel");
-    lifecycle.setAttribute("aria-labelledby", "session-lifecycle-title");
-    const lifecycleHeader = panelHeader("Session lifecycle", "Nothing persists after expiry or host shutdown.");
-    lifecycleHeader.querySelector("h2").id = "session-lifecycle-title";
-    const steps = makeElement("ol", "timeline-list");
-    [
-      { title: "Confirm scope", detail: "Host reviews interface, network, passive/active policy, and duration." },
-      { title: "Pair visibly", detail: "Single-use code and host identity establish the intended session." },
-      { title: "Review together", detail: "Connected clients and time remaining stay visible on both screens." },
-      { title: "Revoke or expire", detail: "The host can stop immediately; absolute expiry clears tokens and keys." },
-    ].forEach(function (step, index) {
-      const row = makeElement("li", "rescue-step");
-      const body = makeElement("div");
-      append(body, makeElement("h3", "", step.title), makeElement("p", "", step.detail));
-      append(row, makeElement("span", "step-number", index + 1), body, makeIcon("chevron-right"));
-      steps.append(row);
-    });
-    append(lifecycle, lifecycleHeader, steps);
-    fragment.append(lifecycle);
-    return fragment;
-  }
-
-  function renderRescue() {
-    const fragment = document.createDocumentFragment();
-    const stopCallout = makeElement("section", "callout status-critical");
-    stopCallout.setAttribute("aria-labelledby", "rescue-stop-title");
-    const body = makeElement("div");
-    const title = makeElement("h3", "", "Protect important data before attempting repair");
-    title.id = "rescue-stop-title";
-    append(body, title, makeElement("p", "", "Storage health, encryption state, and backup readiness are unknown in this fixture. Lantern starts with read-only evidence and treats disk repair, write mounts, boot changes, resets, and encryption operations as guided-only actions."));
-    append(stopCallout, makeIcon("alert"), body);
-    fragment.append(stopCallout);
-
-    const section = makeElement("section", "panel");
-    section.setAttribute("aria-labelledby", "viability-title");
-    const header = panelHeader("Five-part viability view", "A running computer does not prove that its storage, data, or recovery path is healthy.", tag("Synthetic fixture", "info"));
-    header.querySelector("h2").id = "viability-title";
-    const grid = makeElement("div", "viability-grid");
-    DEMO_FIXTURE.rescue.forEach(function (axis) {
-      const card = makeElement("article", "viability-card");
-      append(card, statusBadge(axis.status), makeElement("h3", "", axis.title), makeElement("p", "", axis.detail));
-      grid.append(card);
-    });
-    append(section, header, grid);
-    fragment.append(section);
-
-    const guides = makeElement("section", "panel");
-    guides.setAttribute("aria-labelledby", "guided-checks-title");
-    const guideHeader = panelHeader("Safest sequence", "Platform-specific steps replace a misleading universal boot workflow.");
-    guideHeader.querySelector("h2").id = "guided-checks-title";
-    const list = makeElement("ol", "timeline-list");
-    [
-      { title: "Choose the real platform and startup state", detail: "Apple silicon, Intel Mac, Windows Recovery, and Linux live environments follow different paths.", status: "info" },
-      { title: "Record encryption and data priority", detail: "List FileVault or BitLocker access as a prerequisite without entering a key into Lantern.", status: "blocked" },
-      { title: "Collect read-only evidence", detail: "Check hardware diagnostics, disk visibility, filesystem readability, OS boot stage, and network independently.", status: "unknown" },
-      { title: "Choose the least destructive next step", detail: "Preserve or copy data before repair whenever storage health is uncertain.", status: "attention" },
-    ].forEach(function (step, index) {
-      const row = makeElement("li", "rescue-step");
-      const stepBody = makeElement("div");
-      append(stepBody, makeElement("h3", "", step.title), makeElement("p", "", step.detail));
-      append(row, makeElement("span", "step-number", index + 1), stepBody, statusBadge(step.status));
-      list.append(row);
-    });
-    append(guides, guideHeader, list);
-    fragment.append(guides);
-    return fragment;
-  }
-
-  function renderUnknownView() {
-    return renderStatePanel(
-      "empty-state",
-      "unknown",
-      "That view is not available",
-      "Return to the overview and choose a supported module.",
-      "Return to overview",
-      function () { navigate("overview", true); }
+    return unavailablePanel(
+      "session",
+      "LAN sessions are unavailable",
+      "The page is served only from this computer's loopback address. No LAN listener, pairing route, or remote-control channel is running.",
+      ["Only the browser session on this computer is authenticated.", "Closing or revoking this local session does not create remote access.", "Remote support remains a future, separately reviewed capability."],
     );
   }
 
-  const VIEW_RENDERERS = {
-    overview: renderOverview,
-    device: renderDevice,
-    network: renderNetwork,
-    route: function () { return renderModule("route"); },
-    wifi: function () { return renderModule("wifi"); },
-    dns: function () { return renderModule("dns"); },
-    lan: function () { return renderModule("lan"); },
-    mdns: function () { return renderModule("mdns"); },
-    ports: function () { return renderModule("ports"); },
-    fixes: renderFixes,
-    share: renderShare,
-    session: renderSession,
-    rescue: renderRescue,
-  };
-
-  function render() {
-    setPageMeta(appState.view);
-    setPageActions(appState.view);
-    updateNavigation();
-    updateScanProgress();
-
-    const renderer = VIEW_RENDERERS[appState.view] || renderUnknownView;
-    elements.pageContent.replaceChildren(renderer());
+  function renderShare() {
+    return unavailablePanel(
+      "share",
+      "Sharing is disabled",
+      "This live interface has no download, upload, email, clipboard, or external sharing action.",
+      ["Status remains on this computer.", "No external destination is configured.", "The disabled navigation item is an explicit product boundary."],
+    );
   }
 
-  function navigate(view, moveFocus) {
-    if (!Object.prototype.hasOwnProperty.call(VIEW_RENDERERS, view)) {
+  function renderProgress() {
+    const running = Boolean(statusSnapshot && statusSnapshot.state === "running");
+    runProgress.classList.toggle("is-hidden", !running);
+    if (!running) {
       return;
     }
-    appState.view = view;
-    closeMenu();
-    render();
-    elements.routeAnnouncer.textContent = PAGE_META[view].title + " view loaded";
-    if (moveFocus) {
-      elements.mainContent.focus({ preventScroll: true });
-      window.scrollTo({ top: 0, behavior: "auto" });
-    }
+    const progress = statusSnapshot.progress;
+    const percent = progress.percent;
+    const bucket = Math.min(100, Math.max(0, Math.round(percent / 10) * 10));
+    runProgressValue.textContent = String(percent) + "%";
+    runProgressDetail.textContent = progress.planned > 0
+      ? String(progress.processed) + " of " + String(progress.planned) + " bounded steps reached a terminal state."
+      : "Preparing the authorized diagnostic steps…";
+    progressTrack.setAttribute("aria-valuenow", String(percent));
+    runProgressBar.className = "progress-fill progress-" + String(bucket);
+    cancelButton.disabled = cancelInFlight || Boolean(statusSnapshot.run && statusSnapshot.run.cancel_requested);
+    cancelButton.textContent = statusSnapshot.run && statusSnapshot.run.cancel_requested ? "Cancellation requested" : (cancelInFlight ? "Requesting…" : "Cancel check");
   }
 
-  function updateNavigation() {
-    document.querySelectorAll("[data-view-target]").forEach(function (button) {
-      const isCurrent = button.getAttribute("data-view-target") === appState.view;
-      button.classList.toggle("is-current", isCurrent);
-      if (isCurrent) {
-        button.setAttribute("aria-current", "page");
-      } else {
-        button.removeAttribute("aria-current");
-      }
-    });
-  }
+  function renderCurrentView() {
+    const meta = PAGE_META[currentView] || PAGE_META.overview;
+    pageEyebrow.textContent = meta.eyebrow;
+    pageTitle.textContent = meta.title;
+    pageDescription.textContent = meta.description;
+    renderProgress();
 
-  function updateScanProgress() {
-    const running = appState.scan.phase === "running";
-    elements.scanProgress.classList.toggle("is-hidden", !running);
-    elements.scanProgressDetail.textContent = appState.scan.detail;
-    elements.scanProgressValue.textContent = appState.scan.progress + "%";
-    elements.scanProgressBar.className = "progress-value-" + String(appState.scan.progress);
-    const track = elements.scanProgress.querySelector("[role='progressbar']");
-    track.setAttribute("aria-valuenow", String(appState.scan.progress));
-  }
-
-  function openOnboarding() {
-    if (elements.onboardingDialog.open) {
-      return;
-    }
-    elements.onboardingDialog.showModal();
-  }
-
-  function startDemoScan(goal, activeDiscovery) {
-    if (scanTimer !== null) {
-      window.clearInterval(scanTimer);
-    }
-    appState.activeDiscovery = activeDiscovery;
-    appState.scan.phase = "running";
-    appState.scan.progress = 4;
-    appState.scan.detail = "Confirming platform and interfaces…";
-    if (goal === "rescue") {
-      appState.view = "rescue";
-    } else if (goal === "network") {
-      appState.view = "network";
+    let content;
+    if (currentView === "overview") {
+      content = renderOverview();
+    } else if (currentView === "device") {
+      content = renderDevice();
+    } else if (currentView === "network") {
+      content = renderNetwork();
+    } else if (MODULE_IDS.includes(currentView)) {
+      content = renderModule(currentView);
+    } else if (currentView === "fixes") {
+      content = renderFixes();
+    } else if (currentView === "rescue") {
+      content = renderRescue();
+    } else if (currentView === "session") {
+      content = renderSession();
     } else {
-      appState.view = "overview";
+      content = renderShare();
     }
-    render();
-
-    const steps = [
-      { progress: 18, detail: "Reading the default route…" },
-      { progress: 34, detail: "Checking the local link…" },
-      { progress: 52, detail: "Testing the outbound path…" },
-      { progress: 70, detail: "Comparing DNS answers…" },
-      { progress: 86, detail: activeDiscovery ? "Demonstrating approved LAN scope…" : "Reading passive LAN evidence…" },
-      { progress: 100, detail: "Prioritizing evidence…" },
-    ];
-    let index = 0;
-    scanTimer = window.setInterval(function () {
-      const step = steps[index];
-      appState.scan.progress = step.progress;
-      appState.scan.detail = step.detail;
-      updateScanProgress();
-      index += 1;
-      if (index >= steps.length) {
-        window.clearInterval(scanTimer);
-        scanTimer = null;
-        window.setTimeout(function () {
-          appState.scan.phase = "complete";
-          render();
-          showToast("Read-only demonstration complete. No system or network probe ran.", "healthy");
-          elements.pageTitle.focus({ preventScroll: true });
-        }, 320);
-      }
-    }, 430);
+    const active = document.activeElement;
+    const focusId = active && pageContent.contains(active) ? active.id : "";
+    const focusModule = active && pageContent.contains(active) ? active.dataset.moduleTarget : "";
+    const focusGoal = active && pageContent.contains(active) && active.name === "goal" ? active.value : "";
+    pageContent.replaceChildren(content);
+    let replacement = focusId ? document.getElementById(focusId) : null;
+    if (!replacement && focusModule) {
+      replacement = Array.from(pageContent.querySelectorAll("[data-module-target]")).find((item) => item.dataset.moduleTarget === focusModule);
+    }
+    if (!replacement && focusGoal) {
+      replacement = Array.from(pageContent.querySelectorAll('input[name="goal"]')).find((item) => item.value === focusGoal);
+    }
+    if (replacement) {
+      replacement.focus();
+    }
   }
 
-  function toggleSharePreview() {
-    appState.sharePreview = !appState.sharePreview;
-    render();
-    if (appState.sharePreview) {
-      window.setTimeout(function () {
-        const preview = document.getElementById("redaction-preview-title");
-        if (preview) {
-          preview.setAttribute("tabindex", "-1");
-          preview.focus();
+  function setView(view, focusHeading) {
+    if (!Object.prototype.hasOwnProperty.call(PAGE_META, view)) {
+      return;
+    }
+    currentView = view;
+    for (const item of document.querySelectorAll("[data-view-target]")) {
+      const isCurrent = item.dataset.viewTarget === view;
+      item.classList.toggle("is-current", isCurrent);
+      if (isCurrent) {
+        item.setAttribute("aria-current", "page");
+      } else {
+        item.removeAttribute("aria-current");
+      }
+    }
+    const cameFromDrawer = mobileDrawerQuery.matches && primarySidebar.contains(document.activeElement);
+    const focusDestination = focusHeading || cameFromDrawer;
+    closeSidebar(false);
+    renderCurrentView();
+    if (focusDestination) {
+      pageTitle.focus();
+    }
+  }
+
+  function openSidebar() {
+    if (!mobileDrawerQuery.matches) {
+      return;
+    }
+    primarySidebar.classList.add("is-open");
+    primarySidebar.inert = false;
+    primarySidebar.removeAttribute("aria-hidden");
+    sidebarScrim.classList.add("is-visible");
+    menuToggle.setAttribute("aria-expanded", "true");
+    menuToggle.setAttribute("aria-label", "Close navigation");
+    const firstControl = primarySidebar.querySelector(".nav-item:not(:disabled)");
+    if (firstControl) {
+      firstControl.focus();
+    }
+  }
+
+  function closeSidebar(restoreFocus) {
+    primarySidebar.classList.remove("is-open");
+    sidebarScrim.classList.remove("is-visible");
+    menuToggle.setAttribute("aria-expanded", "false");
+    menuToggle.setAttribute("aria-label", "Open navigation");
+    if (mobileDrawerQuery.matches) {
+      primarySidebar.inert = true;
+      primarySidebar.setAttribute("aria-hidden", "true");
+      if (restoreFocus) {
+        menuToggle.focus();
+      }
+    } else {
+      primarySidebar.inert = false;
+      primarySidebar.removeAttribute("aria-hidden");
+    }
+  }
+
+  function synchronizeSidebarMode() {
+    const focusWasInside = primarySidebar.contains(document.activeElement);
+    if (mobileDrawerQuery.matches) {
+      if (!primarySidebar.classList.contains("is-open")) {
+        if (focusWasInside) {
+          menuToggle.focus();
         }
-      }, 0);
-    }
-  }
-
-  function openFixPreview() {
-    resetFixPreview();
-    elements.fixDialog.showModal();
-  }
-
-  function resetFixPreview() {
-    if (fixTimer !== null) {
-      window.clearInterval(fixTimer);
-      fixTimer = null;
-    }
-    appState.fixPhase = "preview";
-    elements.fixPreviewBody.classList.remove("is-hidden");
-    elements.fixResult.classList.add("is-hidden");
-    elements.fixResultTitle.textContent = "Simulation verified";
-    elements.fixResultDescription.textContent = "The demonstration completed without touching this computer. A real action will show before-and-after evidence here.";
-    elements.simulateFixButton.disabled = false;
-    elements.simulateFixButton.textContent = "Simulate fix lifecycle";
-    document.querySelectorAll("[data-fix-step]").forEach(function (step) {
-      step.classList.remove("is-active", "is-complete", "is-available");
-      if (step.getAttribute("data-fix-step") === "preview") {
-        step.classList.add("is-active");
+        primarySidebar.inert = true;
+        primarySidebar.setAttribute("aria-hidden", "true");
       }
-    });
-  }
-
-  function simulateFixLifecycle() {
-    if (fixTimer !== null) {
       return;
     }
-    if (appState.fixPhase === "verified") {
-      simulateRollback();
+    primarySidebar.classList.remove("is-open");
+    sidebarScrim.classList.remove("is-visible");
+    primarySidebar.inert = false;
+    primarySidebar.removeAttribute("aria-hidden");
+    menuToggle.setAttribute("aria-expanded", "false");
+    menuToggle.setAttribute("aria-label", "Open navigation");
+    if (document.activeElement === menuToggle) {
+      pageTitle.focus();
+    }
+  }
+
+  function containDrawerFocus(event) {
+    if (event.key !== "Tab" || !mobileDrawerQuery.matches || !primarySidebar.classList.contains("is-open")) {
       return;
     }
-
-    const phases = ["apply", "verify"];
-    let index = 0;
-    elements.simulateFixButton.disabled = true;
-    elements.simulateFixButton.textContent = "Simulating…";
-
-    fixTimer = window.setInterval(function () {
-      const phase = phases[index];
-      appState.fixPhase = phase;
-      document.querySelectorAll("[data-fix-step]").forEach(function (step) {
-        const stepName = step.getAttribute("data-fix-step");
-        const order = ["preview", "apply", "verify", "rollback"];
-        const stepIndex = order.indexOf(stepName);
-        const phaseIndex = order.indexOf(phase);
-        step.classList.toggle("is-complete", stepIndex < phaseIndex);
-        step.classList.toggle("is-active", stepIndex === phaseIndex);
-        step.classList.remove("is-available");
-      });
-      index += 1;
-      if (index >= phases.length) {
-        window.clearInterval(fixTimer);
-        fixTimer = window.setTimeout(function () {
-          fixTimer = null;
-          elements.fixPreviewBody.classList.add("is-hidden");
-          elements.fixResult.classList.remove("is-hidden");
-          appState.fixPhase = "verified";
-          document.querySelectorAll("[data-fix-step]").forEach(function (step) {
-            const stepName = step.getAttribute("data-fix-step");
-            step.classList.remove("is-active");
-            step.classList.toggle("is-complete", stepName !== "rollback");
-            step.classList.toggle("is-available", stepName === "rollback");
-          });
-          elements.simulateFixButton.disabled = false;
-          elements.simulateFixButton.textContent = "Simulate rollback";
-          elements.fixResult.setAttribute("tabindex", "-1");
-          elements.fixResult.focus();
-        }, 380);
-      }
-    }, 620);
-  }
-
-  function simulateRollback() {
-    appState.fixPhase = "rollback";
-    elements.simulateFixButton.disabled = true;
-    elements.simulateFixButton.textContent = "Rolling back simulation…";
-    document.querySelectorAll("[data-fix-step]").forEach(function (step) {
-      const stepName = step.getAttribute("data-fix-step");
-      step.classList.remove("is-available");
-      step.classList.toggle("is-complete", stepName !== "rollback");
-      step.classList.toggle("is-active", stepName === "rollback");
-    });
-    fixTimer = window.setTimeout(function () {
-      fixTimer = null;
-      document.querySelectorAll("[data-fix-step]").forEach(function (step) {
-        step.classList.remove("is-active", "is-available");
-        step.classList.add("is-complete");
-      });
-      elements.fixResultTitle.textContent = "Simulation rolled back";
-      elements.fixResultDescription.textContent = "The preview returned to its original synthetic state. No computer setting was touched.";
-      elements.simulateFixButton.textContent = "Rollback simulated";
-      elements.fixResult.focus();
-    }, 700);
-  }
-
-  function showToast(message, status) {
-    const toast = makeElement("div", "toast");
-    toast.setAttribute("role", "status");
-    append(toast, makeIcon(STATUS[status] ? STATUS[status].icon : "info"), makeElement("span", "", message));
-    elements.toastRegion.replaceChildren(toast);
-    window.setTimeout(function () {
-      if (toast.isConnected) {
-        toast.remove();
-      }
-    }, 4800);
-  }
-
-  function openMenu() {
-    appState.menuOpen = true;
-    elements.sidebar.classList.add("is-open");
-    elements.menuToggle.setAttribute("aria-expanded", "true");
-    elements.menuToggle.setAttribute("aria-label", "Close navigation");
-    const first = elements.sidebar.querySelector("button[data-view-target]");
-    if (first) {
+    const controls = Array.from(primarySidebar.querySelectorAll("button:not(:disabled), a[href]"));
+    if (controls.length === 0) {
+      event.preventDefault();
+      menuToggle.focus();
+      return;
+    }
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !primarySidebar.contains(document.activeElement))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (document.activeElement === last || !primarySidebar.contains(document.activeElement))) {
+      event.preventDefault();
       first.focus();
     }
   }
 
-  function closeMenu() {
-    appState.menuOpen = false;
-    elements.sidebar.classList.remove("is-open");
-    elements.menuToggle.setAttribute("aria-expanded", "false");
-    elements.menuToggle.setAttribute("aria-label", "Open navigation");
-  }
-
-  function cacheElements() {
-    elements.pageContent = document.getElementById("page-content");
-    elements.pageEyebrow = document.getElementById("page-eyebrow");
-    elements.pageTitle = document.getElementById("page-title");
-    elements.pageDescription = document.getElementById("page-description");
-    elements.pageActions = document.getElementById("page-actions");
-    elements.mainContent = document.getElementById("main-content");
-    elements.routeAnnouncer = document.getElementById("route-announcer");
-    elements.scanProgress = document.getElementById("scan-progress");
-    elements.scanProgressDetail = document.getElementById("scan-progress-detail");
-    elements.scanProgressValue = document.getElementById("scan-progress-value");
-    elements.scanProgressBar = document.getElementById("scan-progress-bar");
-    elements.onboardingDialog = document.getElementById("onboarding-dialog");
-    elements.onboardingForm = document.getElementById("onboarding-form");
-    elements.fixDialog = document.getElementById("fix-dialog");
-    elements.fixPreviewBody = document.getElementById("fix-preview-body");
-    elements.fixResult = document.getElementById("fix-result");
-    elements.fixResultTitle = document.getElementById("fix-result-title");
-    elements.fixResultDescription = document.getElementById("fix-result-description");
-    elements.simulateFixButton = document.getElementById("simulate-fix-button");
-    elements.toastRegion = document.getElementById("toast-region");
-    elements.menuToggle = document.getElementById("menu-toggle");
-    elements.sidebar = document.getElementById("primary-sidebar");
-    elements.sidebarScrim = document.getElementById("sidebar-scrim");
-  }
-
-  function bindEvents() {
-    document.querySelectorAll("[data-view-target]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        navigate(button.getAttribute("data-view-target"), true);
-      });
-    });
-
-    document.getElementById("new-check-button").addEventListener("click", openOnboarding);
-    elements.menuToggle.addEventListener("click", function () {
-      if (appState.menuOpen) {
-        closeMenu();
-      } else {
-        openMenu();
+  async function startCheck() {
+    if (!authenticated || !statusSnapshot || startInFlight || statusSnapshot.state === "running") {
+      return;
+    }
+    const generation = sessionGeneration;
+    startInFlight = true;
+    renderCurrentView();
+    const profile = draftBasic ? "low_impact_network" : "passive";
+    const includeMdns = draftBasic && draftMdns;
+    const requestBody = { goal: draftGoal, profile: profile, include_mdns: includeMdns };
+    try {
+      const response = await postMutation("/api/diagnostics/start", requestBody, false, generation);
+      requireCurrentSession(generation);
+      if (!response.ok) {
+        const message = await failureMessage(response, "Lantern did not accept the diagnostic request.");
+        requireCurrentSession(generation);
+        throw new Error(message);
       }
-    });
-    elements.sidebarScrim.addEventListener("click", function () {
-      closeMenu();
-      elements.menuToggle.focus();
-    });
-
-    elements.onboardingForm.addEventListener("submit", function (event) {
-      event.preventDefault();
-      const selectedGoal = elements.onboardingForm.querySelector("input[name='goal']:checked");
-      const activeDiscovery = document.getElementById("active-discovery").checked;
-      elements.onboardingDialog.close();
-      startDemoScan(selectedGoal ? selectedGoal.value : "problem", activeDiscovery);
-    });
-
-    elements.simulateFixButton.addEventListener("click", simulateFixLifecycle);
-    elements.fixDialog.addEventListener("close", resetFixPreview);
-
-    document.addEventListener("keydown", function (event) {
-      if (event.key === "Escape" && appState.menuOpen) {
-        closeMenu();
-        elements.menuToggle.focus();
+      const result = await readJson(response);
+      requireCurrentSession(generation);
+      if (!exactKeys(result, ["accepted"], []) || result.accepted !== true) {
+        throw new Error("Lantern returned an invalid start response.");
       }
-    });
-  }
-
-  function init() {
-    cacheElements();
-    bindEvents();
-    render();
-    if (DEMO_MODE) {
-      window.setTimeout(openOnboarding, 180);
+      draftBasic = false;
+      draftMdns = false;
+      showNotice("The authorized diagnostic started. You can cancel it at a module boundary.", "info");
+      await pollStatus(true, generation);
+    } catch (error) {
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      showNotice(error instanceof Error ? boundedText(error.message, 300, "Lantern could not start the check.") : "Lantern could not start the check.", "attention");
+    } finally {
+      if (isCurrentSession(generation)) {
+        startInFlight = false;
+        renderCurrentView();
+      }
     }
   }
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
-  } else {
-    init();
+  async function cancelCheck() {
+    if (!authenticated || cancelInFlight || !statusSnapshot || statusSnapshot.state !== "running") {
+      return;
+    }
+    const generation = sessionGeneration;
+    cancelInFlight = true;
+    renderProgress();
+    try {
+      const response = await postMutation("/api/diagnostics/cancel", {}, true, generation);
+      requireCurrentSession(generation);
+      if (!response.ok) {
+        const message = await failureMessage(response, "Lantern could not request cancellation.");
+        requireCurrentSession(generation);
+        throw new Error(message);
+      }
+      const result = await readJson(response);
+      requireCurrentSession(generation);
+      if (!exactKeys(result, ["cancel_requested"], []) || typeof result.cancel_requested !== "boolean") {
+        throw new Error("Lantern returned an invalid cancellation response.");
+      }
+      showNotice(result.cancel_requested ? "Cancellation was requested. The current bounded module will stop at its cooperative boundary." : "The diagnostic had already reached a terminal state.", "info");
+      await pollStatus(true, generation);
+    } catch (error) {
+      if (!isCurrentSession(generation)) {
+        return;
+      }
+      showNotice(error instanceof Error ? boundedText(error.message, 300, "Lantern could not request cancellation.") : "Lantern could not request cancellation.", "attention");
+    } finally {
+      if (isCurrentSession(generation)) {
+        cancelInFlight = false;
+        renderProgress();
+      }
+    }
   }
+
+  async function revokeSession() {
+    if (!authenticated || revokeInFlight) {
+      return;
+    }
+    const generation = sessionGeneration;
+    revokeInFlight = true;
+    setSessionActionsDisabled(true);
+    try {
+      const response = await postMutation("/api/session/revoke", {}, true, generation);
+      requireCurrentSession(generation);
+      if (!response.ok) {
+        const message = await failureMessage(response, "Lantern could not end the local session.");
+        requireCurrentSession(generation);
+        throw new Error(message);
+      }
+      const result = await readJson(response);
+      requireCurrentSession(generation);
+      if (!exactKeys(result, ["revoked"], []) || result.revoked !== true) {
+        throw new Error("Lantern returned an invalid revoke response.");
+      }
+      clearSession("The private local session ended. Launch Lantern again to reconnect.", "info");
+      if (!mobileDrawerQuery.matches) {
+        sessionNotice.focus();
+      }
+    } catch (error) {
+      if (isCurrentSession(generation)) {
+        revokeInFlight = false;
+        setSessionActionsDisabled(false);
+        showNotice(error instanceof Error ? boundedText(error.message, 300, "Lantern could not end the local session.") : "Lantern could not end the local session.", "attention");
+        if (mobileDrawerQuery.matches) {
+          closeSidebar(true);
+        } else {
+          sessionNotice.focus();
+        }
+      }
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    const viewButton = event.target.closest("[data-view-target]");
+    if (viewButton && !viewButton.disabled) {
+      setView(viewButton.dataset.viewTarget, true);
+      return;
+    }
+    const moduleButton = event.target.closest("[data-module-target]");
+    if (moduleButton) {
+      setView(moduleButton.dataset.moduleTarget, true);
+    }
+  });
+
+  pageContent.addEventListener("change", function (event) {
+    const target = event.target;
+    if (target.name === "goal" && GOALS.has(target.value)) {
+      draftGoal = target.value;
+    } else if (target.id === "basic-network-checks") {
+      draftBasic = target.checked;
+      if (!draftBasic) {
+        draftMdns = false;
+      }
+      const mdns = document.getElementById("include-mdns");
+      if (mdns) {
+        mdns.disabled = !draftBasic;
+        mdns.checked = draftMdns;
+      }
+    } else if (target.id === "include-mdns") {
+      draftMdns = target.checked;
+    }
+  });
+
+  pageContent.addEventListener("submit", function (event) {
+    if (event.target.id === "start-check-form") {
+      event.preventDefault();
+      void startCheck();
+    }
+  });
+
+  menuToggle.addEventListener("click", function () {
+    if (primarySidebar.classList.contains("is-open")) {
+      closeSidebar(true);
+    } else {
+      openSidebar();
+    }
+  });
+  sidebarScrim.addEventListener("click", function () { closeSidebar(true); });
+  cancelButton.addEventListener("click", function () { void cancelCheck(); });
+  endSessionButton.addEventListener("click", function () { void revokeSession(); });
+  mobileEndSessionButton.addEventListener("click", function () { void revokeSession(); });
+  newCheckButton.addEventListener("click", function () {
+    setView("overview", true);
+    const form = document.getElementById("start-check-form");
+    if (form) {
+      form.querySelector("input").focus();
+    }
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && primarySidebar.classList.contains("is-open")) {
+      event.preventDefault();
+      closeSidebar(true);
+      return;
+    }
+    containDrawerFocus(event);
+  });
+  mobileDrawerQuery.addEventListener("change", synchronizeSidebarMode);
+
+  synchronizeSidebarMode();
+  renderCurrentView();
+  void establishSession();
 }());

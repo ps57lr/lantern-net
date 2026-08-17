@@ -13,10 +13,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from netdiag.application import ScanAlreadyRunning
 from netdiag.ui import server as server_module
 from netdiag.ui.controller import JsonValue
 from netdiag.ui.security import LocalSessionSecurity
 from netdiag.ui.server import LanternLocalServer
+from netdiag.ui.viewmodel import ready_ui_viewmodel
 
 
 @dataclass(slots=True)
@@ -633,3 +635,306 @@ def test_shutdown_does_not_wait_indefinitely_for_partial_request() -> None:
         assert elapsed < 1.0
     finally:
         client.close()
+
+
+class FixtureDiagnosticService:
+    def __init__(self) -> None:
+        self.starts: list[dict[str, object]] = []
+        self.cancel_result: object = True
+        self.start_error: Exception | None = None
+        self.closed = False
+
+    def snapshot(self) -> dict[str, JsonValue]:
+        return ready_ui_viewmodel()
+
+    def start(self, start_request) -> None:
+        if self.start_error is not None:
+            raise self.start_error
+        self.starts.append(dict(start_request))
+
+    def cancel(self):
+        return self.cancel_result
+
+    def close(self, *, timeout: float = 3.0) -> bool:
+        del timeout
+        self.closed = True
+        return True
+
+
+def mutation_headers(server: LanternLocalServer, cookie: str, csrf: str) -> dict[str, str]:
+    return {
+        "Content-Type": "application/json",
+        "Origin": server.origin,
+        "Cookie": cookie,
+        "X-Lantern-CSRF": csrf,
+    }
+
+
+def test_diagnostic_start_requires_shared_auth_and_accepts_only_exact_shape() -> None:
+    service = FixtureDiagnosticService()
+    with LanternLocalServer(diagnostic_service=service) as server:
+        _result, cookie, csrf = exchange(server)
+        payload = {"goal": "problem", "profile": "passive", "include_mdns": False}
+
+        missing_csrf = request(
+            server,
+            "POST",
+            "/api/diagnostics/start",
+            body=json.dumps(payload),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": server.origin,
+                "Cookie": cookie,
+            },
+        )
+        assert missing_csrf.status == 403
+        assert error_code(missing_csrf) == "csrf_denied"
+
+        extra = request(
+            server,
+            "POST",
+            "/api/diagnostics/start",
+            body=json.dumps({**payload, "credential": "password=hunter2"}),
+            headers=mutation_headers(server, cookie, csrf),
+        )
+        assert extra.status == 400
+        assert error_code(extra) == "invalid_request"
+        assert b"hunter2" not in extra.body
+
+        accepted = request(
+            server,
+            "POST",
+            "/api/diagnostics/start",
+            body=json.dumps(payload),
+            headers=mutation_headers(server, cookie, csrf),
+        )
+        assert accepted.status == 202
+        assert accepted.json() == {"accepted": True}
+        assert service.starts == [payload]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"goal": "network", "profile": "passive"},
+        {"goal": "network", "profile": "active_discovery", "include_mdns": False},
+        {"goal": "network", "profile": "passive", "include_mdns": True},
+        {"goal": "network", "profile": "passive", "include_mdns": 0},
+        {
+            "goal": "network",
+            "profile": "passive",
+            "include_mdns": False,
+            "target": "192.168.1.1",
+        },
+    ],
+)
+def test_diagnostic_start_rejects_missing_active_and_type_confused_payloads(
+    payload: dict[str, object],
+) -> None:
+    # Use the real service parser while an immediate controller keeps this
+    # transport test independent of platform collectors for invalid requests.
+    with LanternLocalServer() as server:
+        _result, cookie, csrf = exchange(server)
+        response = request(
+            server,
+            "POST",
+            "/api/diagnostics/start",
+            body=json.dumps(payload),
+            headers=mutation_headers(server, cookie, csrf),
+        )
+        assert response.status == 400
+        assert error_code(response) == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "raw_body",
+    [
+        b'{"goal":"network","goal":"problem","profile":"passive","include_mdns":false}',
+        b'{"goal":"network","profile":"passive","include_mdns":NaN}',
+        b'{"goal":"network","profile":"passive","include_mdns":'
+        + b"[" * 1000
+        + b"0"
+        + b"]" * 1000
+        + b"}",
+    ],
+)
+def test_diagnostic_json_rejects_duplicates_constants_and_excessive_nesting(
+    raw_body: bytes,
+) -> None:
+    with LanternLocalServer() as server:
+        _result, cookie, csrf = exchange(server)
+        response = request(
+            server,
+            "POST",
+            "/api/diagnostics/start",
+            body=raw_body,
+            headers=mutation_headers(server, cookie, csrf),
+        )
+        assert response.status == 400
+        assert error_code(response) == "invalid_json"
+
+
+def test_concurrent_and_failed_starts_use_normalized_409_and_503_without_details() -> None:
+    service = FixtureDiagnosticService()
+    with LanternLocalServer(diagnostic_service=service) as server:
+        _result, cookie, csrf = exchange(server)
+        headers = mutation_headers(server, cookie, csrf)
+        body = json.dumps({"goal": "network", "profile": "passive", "include_mdns": False})
+
+        service.start_error = ScanAlreadyRunning("password=hunter2")
+        conflict = request(server, "POST", "/api/diagnostics/start", body=body, headers=headers)
+        assert conflict.status == 409
+        assert error_code(conflict) == "diagnostic_running"
+        assert b"hunter2" not in conflict.body
+
+        service.start_error = RuntimeError("family-mac.local recovery-key=abc")
+        unavailable = request(server, "POST", "/api/diagnostics/start", body=body, headers=headers)
+        assert unavailable.status == 503
+        assert error_code(unavailable) == "diagnostics_unavailable"
+        assert b"family-mac" not in unavailable.body
+        assert b"recovery-key" not in unavailable.body
+
+
+def test_cancel_is_exact_authenticated_and_rejects_non_boolean_service_results() -> None:
+    service = FixtureDiagnosticService()
+    with LanternLocalServer(diagnostic_service=service) as server:
+        _result, cookie, csrf = exchange(server)
+        headers = mutation_headers(server, cookie, csrf)
+
+        requested = request(server, "POST", "/api/diagnostics/cancel", body="{}", headers=headers)
+        assert requested.status == 200
+        assert requested.json() == {"cancel_requested": True}
+
+        extra = request(
+            server,
+            "POST",
+            "/api/diagnostics/cancel",
+            body=json.dumps({"reason": "now"}),
+            headers=headers,
+        )
+        assert extra.status == 400
+        assert error_code(extra) == "invalid_request"
+
+        service.cancel_result = "password=hunter2"
+        invalid = request(server, "POST", "/api/diagnostics/cancel", body="{}", headers=headers)
+        assert invalid.status == 503
+        assert error_code(invalid) == "diagnostics_unavailable"
+        assert b"hunter2" not in invalid.body
+
+
+def test_revoke_wakes_wait_only_after_response_and_does_not_close_in_handler() -> None:
+    server = LanternLocalServer().start()
+    try:
+        _result, cookie, csrf = exchange(server)
+        assert server.wait(timeout=0) is False
+        assert server.shutdown_requested is False
+
+        revoked = request(
+            server,
+            "POST",
+            "/api/session/revoke",
+            body="{}",
+            headers=mutation_headers(server, cookie, csrf),
+        )
+        assert revoked.status == 200
+        assert revoked.json() == {"revoked": True}
+        assert server.wait(timeout=0.5) is True
+        assert server.shutdown_requested is True
+        assert server.is_running
+    finally:
+        server.close()
+
+
+def test_failed_response_write_never_invokes_after_write_callback() -> None:
+    invoked: list[bool] = []
+
+    class FailingHandler:
+        close_connection = False
+        wfile = None
+
+        def __init__(self) -> None:
+            class Writer:
+                def write(self, _body: bytes) -> None:
+                    raise BrokenPipeError
+
+                def flush(self) -> None:
+                    return
+
+            self.wfile = Writer()
+
+        def send_response_only(self, _status: int) -> None:
+            return
+
+        def send_header(self, _name: str, _value: str) -> None:
+            return
+
+        def end_headers(self) -> None:
+            return
+
+    response = server_module._json_response(
+        200,
+        {"ok": True},
+        after_write=lambda: invoked.append(True),
+    )
+    server_module._LocalRequestHandler.write_response(FailingHandler(), response, head_only=False)
+
+    assert invoked == []
+
+
+def test_absolute_local_lifetime_closes_disappeared_browser_session() -> None:
+    server = LanternLocalServer(max_lifetime_seconds=0.05).start()
+    assert server.wait(timeout=1) is False
+    deadline = time.monotonic() + 1
+    while server.is_running and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not server.is_running
+    assert server.shutdown_requested is False
+    server.close()
+
+
+def test_start_is_idempotent_and_injected_service_retains_caller_ownership() -> None:
+    service = FixtureDiagnosticService()
+    server = LanternLocalServer(diagnostic_service=service)
+    assert server.start() is server
+    port = server.port
+    assert server.start() is server
+    assert server.port == port
+    server.close()
+    server.close()
+    assert service.closed is False
+
+
+def test_owned_service_shutdown_failure_is_not_silently_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UncooperativeService(FixtureDiagnosticService):
+        def close(self, *, timeout: float = 3.0) -> bool:
+            del timeout
+            return False
+
+    monkeypatch.setattr(server_module, "LocalDiagnosticService", UncooperativeService)
+    server = LanternLocalServer().start()
+
+    with pytest.raises(RuntimeError, match="did not shut down cleanly") as exc_info:
+        server.close()
+    assert "password" not in str(exc_info.value)
+
+
+def test_lifetime_guard_normalizes_cleanup_failure_without_stranding_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UncooperativeService(FixtureDiagnosticService):
+        def close(self, *, timeout: float = 3.0) -> bool:
+            del timeout
+            return False
+
+    monkeypatch.setattr(server_module, "LocalDiagnosticService", UncooperativeService)
+    server = LanternLocalServer(max_lifetime_seconds=0.05).start()
+    assert server.wait(timeout=1) is False
+    deadline = time.monotonic() + 1
+    while not server.lifecycle_failed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert server.lifecycle_failed
+    assert not server.is_running
+    server.close()

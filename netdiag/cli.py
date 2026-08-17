@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
+import threading
+import time
+import webbrowser
+from collections.abc import Callable
 
 from netdiag import __version__
 from netdiag.checks.dns import (
@@ -22,11 +27,15 @@ from netdiag.checks.ports import scan_ports
 from netdiag.checks.routing import check_routing
 from netdiag.checks.wifi import check_wifi
 from netdiag.findings import Finding, exit_code
-from netdiag.platform import detect_os, maybe_reexec_macos_system_python, which
+from netdiag.platform import detect_os, which
 from netdiag.presentation import serialize_command_result
 from netdiag.report import print_report
 from netdiag.scanner import report_exit_code, run_full_scan
 from netdiag.terminal import terminal_safe
+
+_UI_SESSION_LIFETIME_SECONDS = 15 * 60.0
+_UI_WAIT_SLICE_SECONDS = 0.25
+_UI_BROWSER_OPEN_TIMEOUT_SECONDS = 10.0
 
 
 def _json_result(findings: list[Finding], data: dict, *, category: str) -> None:
@@ -183,6 +192,157 @@ def cmd_mdns(args: argparse.Namespace) -> int:
     return exit_code(findings)
 
 
+def _create_ui_runtime():
+    """Create one shared service/server pair without importing UI code at CLI startup."""
+
+    from netdiag.ui import LanternLocalServer, LocalDiagnosticService
+
+    service = LocalDiagnosticService()
+    return service, LanternLocalServer(diagnostic_service=service)
+
+
+def _install_ui_signal_handlers(
+    stop_requested: threading.Event,
+) -> dict[signal.Signals, object]:
+    previous: dict[signal.Signals, object] = {}
+
+    def request_stop(_signum: int, _frame: object) -> None:
+        stop_requested.set()
+
+    for name in ("SIGINT", "SIGTERM"):
+        member = getattr(signal, name, None)
+        if member is None:
+            continue
+        try:
+            previous[member] = signal.getsignal(member)
+            signal.signal(member, request_stop)
+        except (OSError, ValueError):
+            previous.pop(member, None)
+    return previous
+
+
+def _restore_ui_signal_handlers(previous: dict[signal.Signals, object]) -> None:
+    for member, handler in previous.items():
+        try:
+            signal.signal(member, handler)
+        except (OSError, ValueError):
+            continue
+
+
+def _wait_for_ui_exit(
+    server: object,
+    stop_requested: threading.Event,
+    *,
+    deadline: float,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Wait for revoke or a signal, bounded by the absolute local-session lifetime."""
+
+    wait = getattr(server, "wait", None)
+    if not callable(wait):
+        raise TypeError("local UI server does not provide a wait lifecycle")
+    while not stop_requested.is_set():
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return False
+        if wait(min(_UI_WAIT_SLICE_SECONDS, remaining)):
+            return True
+    return True
+
+
+def _open_ui_browser(url: str, *, timeout: float) -> bool:
+    """Bound a potentially blocking platform browser launcher in a daemon thread."""
+
+    if type(url) is not str or not url or timeout <= 0:
+        return False
+    completed = threading.Event()
+    opened = False
+
+    def launch() -> None:
+        nonlocal opened
+        try:
+            opened = webbrowser.open(url, new=1, autoraise=True) is True
+        except Exception:  # noqa: BLE001 - launcher errors may contain paths or arguments.
+            opened = False
+        finally:
+            completed.set()
+
+    thread = threading.Thread(
+        target=launch,
+        name="lantern-browser-launch",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:  # noqa: BLE001 - normalize platform thread-launch failure.
+        return False
+    if not completed.wait(timeout):
+        return False
+    thread.join(timeout=0)
+    return opened
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Open the local-only development UI without starting a diagnostic."""
+
+    del args
+    service = None
+    server = None
+    result = 0
+    stop_requested = threading.Event()
+    previous_handlers = _install_ui_signal_handlers(stop_requested)
+    deadline = time.monotonic() + _UI_SESSION_LIFETIME_SECONDS
+    try:
+        service, server = _create_ui_runtime()
+        server.start()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("Lantern's local session expired and was closed.")
+        elif not _open_ui_browser(
+            server.launch_url,
+            timeout=min(_UI_BROWSER_OPEN_TIMEOUT_SECONDS, remaining),
+        ):
+            print(
+                "netdiag: Lantern could not open the local browser interface.",
+                file=sys.stderr,
+            )
+            result = 1
+        else:
+            print("Lantern local developer preview is open in your browser.")
+            print("No scan or repair starts automatically, and nothing is uploaded.")
+            print("Choose End local session or press Ctrl-C to close Lantern.")
+            try:
+                ended = _wait_for_ui_exit(
+                    server,
+                    stop_requested,
+                    deadline=deadline,
+                    monotonic=time.monotonic,
+                )
+            except KeyboardInterrupt:
+                ended = True
+            if not ended:
+                print("Lantern's local session expired and was closed.")
+    except KeyboardInterrupt:
+        result = 0
+    except Exception:  # noqa: BLE001 - never echo local paths, launch tokens, or adapter errors.
+        print("netdiag: Lantern's local interface could not be started.", file=sys.stderr)
+        result = 1
+    finally:
+        _restore_ui_signal_handlers(previous_handlers)
+        if server is not None:
+            try:
+                server.close()
+            except Exception:  # noqa: BLE001 - cleanup errors are normalized.
+                result = 1
+        if service is not None:
+            try:
+                if not service.close(timeout=3.0):
+                    result = 1
+            except Exception:  # noqa: BLE001 - cleanup errors are normalized.
+                result = 1
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="netdiag",
@@ -238,11 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     mdns_p.add_argument("--timeout", type=_positive_timeout, default=5.0)
     mdns_p.set_defaults(func=cmd_mdns)
 
+    ui_p = sub.add_parser("ui", help="Open the local browser interface (development preview)")
+    ui_p.set_defaults(func=cmd_ui)
+
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    maybe_reexec_macos_system_python(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:

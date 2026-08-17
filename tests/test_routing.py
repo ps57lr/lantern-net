@@ -106,7 +106,67 @@ def test_passive_routing_inventory_never_emits_icmp_or_tcp() -> None:
 
     ping.assert_not_called()
     tcp.assert_not_called()
-    assert findings == []
+    assert [finding.code for finding in findings] == ["NDG.ROUTE.DEFAULT_ROUTE_OBSERVED"]
+    assert findings[0].status.value == "informational"
+    assert "Internet and DNS reachability were not tested" in findings[0].detail
     assert data["has_default_route"] is True
     assert data["network_probes"] is False
     assert data["connectivity_status"] == "not_run"
+
+
+def test_route_command_failure_is_unavailable_not_a_missing_route() -> None:
+    with (
+        patch(
+            "netdiag.checks.routing.run_ok",
+            side_effect=[
+                "(command failed: exit 1: password=hunter2)",
+                "en0: flags=8863<UP>\n\tinet 192.168.1.25 netmask 0xffffff00\n",
+            ],
+        ),
+        patch("netdiag.checks.routing._ping_host") as ping,
+        patch("netdiag.checks.routing.socket.create_connection") as tcp,
+    ):
+        findings, data = check_routing(MAC, network_probes=True)
+
+    ping.assert_not_called()
+    tcp.assert_not_called()
+    assert data["collector_status"] == "failed"
+    assert data["has_default_route"] is None
+    assert data["connectivity_status"] == "not_run"
+    assert [finding.code for finding in findings] == ["NDG.ROUTE.CHECK_FAILED"]
+    rendered = str([finding.to_dict() for finding in findings]) + str(data)
+    assert "DEFAULT_ROUTE_MISSING" not in rendered
+    assert "password=hunter2" not in rendered
+
+
+def test_successful_linux_inventory_can_positively_observe_no_ipv4_default_route() -> None:
+    with patch(
+        "netdiag.checks.routing.run_ok",
+        side_effect=[
+            "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.25\n",
+            "2: eth0: <BROADCAST,MULTICAST,UP>\n    inet 192.168.1.25/24 scope global eth0\n",
+        ],
+    ):
+        findings, data = check_routing(LINUX, network_probes=False)
+
+    assert data["collector_status"] == "ok"
+    assert data["has_default_route"] is False
+    assert [finding.code for finding in findings] == ["NDG.ROUTE.DEFAULT_ROUTE_MISSING"]
+    assert "IPv4" in findings[0].title
+    assert "IPv6 and Internet reachability were not tested" in findings[0].detail
+
+
+def test_linux_route_command_failure_is_not_treated_as_observed_absence() -> None:
+    with patch(
+        "netdiag.checks.routing.run_ok",
+        side_effect=[
+            "(command failed: timed out)",
+            "(command failed: ip command unavailable)",
+        ],
+    ):
+        findings, data = check_routing(LINUX, network_probes=False)
+
+    assert data["collector_status"] == "failed"
+    assert data["has_default_route"] is None
+    assert data["connectivity_status"] == "not_run"
+    assert [finding.code for finding in findings] == ["NDG.ROUTE.CHECK_FAILED"]

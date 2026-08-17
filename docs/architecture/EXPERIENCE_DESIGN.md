@@ -46,12 +46,13 @@ seam; it must not parse console output or infer health independently.
   finding codes, confidence, test-status, dependency, permission, or action models
   the UI needs. Add those models below the UI rather than creating a second diagnosis
   engine in JavaScript.
-- macOS neighbor collection currently re-executes the whole CLI with
-  `/usr/bin/python3` so PF_ROUTE/sysctl returns link-layer data. That mechanism is
-  not automatically compatible with a frozen application, whose modules live in a
-  bundle rather than an importable checkout. Portable builds must not claim the
-  macOS LAN module until this path is explicitly exercised and adapted as described
-  under Portable delivery.
+- The earlier macOS neighbor collector re-executed the whole CLI with
+  `/usr/bin/python3`. That path has been removed: it is incompatible with a frozen
+  application and can move the entire product across an unintended interpreter
+  boundary. A narrow system-Python subprocess was also disproved on a modern Mac
+  because it inherited the parent process's restricted PF_ROUTE visibility. The
+  current collector therefore reports partial neighbor coverage when link-layer
+  data is unavailable; portable builds must not imply complete LAN visibility.
 - The current package has no Windows adapters. A Windows launcher can be prototyped,
   but the UI must show unsupported collectors and cannot imply Windows diagnostic or
   rescue parity until fixtures and real-platform tests exist.
@@ -518,25 +519,29 @@ or changes host configuration merely because it runs from removable media.
   applicable, not beside the executable. Remove it on clean shutdown and redact any
   retained crash metadata.
 
-### macOS neighbor helper packaging gate
+### macOS neighbor visibility packaging gate
 
-Do not let `maybe_reexec_macos_system_python()` re-exec the entire frozen Lantern
-application. First test whether the signed/frozen main process can read the PF_ROUTE
-dump directly. If it cannot:
+Do not re-execute the whole Lantern application under a system Python. Do not add a
+system-Python neighbor subprocess: real-process testing showed that it inherits the
+parent application's macOS responsibility and the same restricted PF_ROUTE view,
+so it adds a trust boundary without restoring link-layer visibility. The current
+safe behavior is a truthful `partial` result.
 
-1. Isolate only the existing bounded neighbor-table operation behind a typed helper
-   protocol: no arguments other than a schema version, JSON only on stdout, a strict
-   output-size limit, and no elevation.
-2. Use the existing small Python helper through `/usr/bin/python3` only as a detected
-   development fallback. Report `unsupported` when that interpreter is absent; do
-   not silently lose the LAN module.
-3. For a self-contained Mac artifact, replace the fallback with a minimal C or Swift
-   helper that performs the same sysctl/PF_ROUTE read, is built in the protected
-   pipeline, included in the app bundle, and signed with the parent app.
-4. Verify arm64 and x86_64 output against the current parser fixtures and real Macs.
+Any future full-visibility path requires a separately threat-modeled native C or
+Swift component or app capability that:
 
-This helper remains read-only and unprivileged. It is not the general privileged
-helper contemplated for remediations and must never accept commands or paths.
+1. performs only the bounded PF_ROUTE/sysctl neighbor read and accepts no commands,
+   paths, credentials, targets, or arbitrary arguments;
+2. uses a fixed, versioned, size-bounded typed protocol and validates every IP,
+   interface index, network boundary, and MAC address again in the parent;
+3. is built in the protected pipeline, bundled with Lantern, and signed with the
+   parent application using the minimum reviewed entitlement or capability;
+4. is tested under the actual signed/frozen process topology on arm64 and x86_64,
+   including restricted visibility, malformed output, timeout, and cleanup cases.
+
+This component would remain read-only and distinct from any future privileged
+remediation helper. Until that gate passes, partial neighbor/MAC visibility is an
+honest platform limitation rather than a device or network failure.
 
 ## LAN responder architecture
 

@@ -42,6 +42,7 @@ _SECTION_CLASSIFICATIONS: dict[str, dict[str, Sensitivity]] = {
         "/default_interface": Sensitivity.DEVICE_IDENTIFIER,
         "/has_default_route": Sensitivity.PUBLIC,
         "/network_probes": Sensitivity.PUBLIC,
+        "/collector_status": Sensitivity.PUBLIC,
         "/connectivity_status": Sensitivity.PUBLIC,
         "/interfaces/*/name": Sensitivity.DEVICE_IDENTIFIER,
         "/interfaces/*/addresses/*": Sensitivity.NETWORK_ADDRESS,
@@ -816,8 +817,10 @@ def _validate_routing_data(data: dict) -> None:
         "ping_8.8.8.8",
         "tcp_443",
     ):
-        if field in data:
+        if field in data and data[field] is not None:
             _exact_bool(data[field], f"routing.{field}")
+    if "collector_status" in data and data["collector_status"] not in {"ok", "failed"}:
+        raise ValueError("routing.collector_status is not a registered state")
     if "connectivity_status" in data and data["connectivity_status"] != "not_run":
         raise ValueError("routing.connectivity_status is not a registered state")
 

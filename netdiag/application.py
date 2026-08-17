@@ -193,6 +193,7 @@ class DiagnosticController:
         self._generation = 0
         self._presentation: dict[str, JsonValue] | None = None
         self._error: dict[str, JsonValue] | None = None
+        self._run_metadata: dict[str, JsonValue] | None = None
         self._closed = False
         self._started_monotonic: float | None = None
         self._duration_ms = 0
@@ -233,6 +234,12 @@ class DiagnosticController:
             self._event_sequence = 0
             self._presentation = None
             self._error = None
+            self._run_metadata = {
+                "goal": consent.goal.value,
+                "profile": policy.maximum_activity.value,
+                "include_mdns": include_mdns,
+                "cancel_requested": False,
+            }
             self._started_monotonic = time.monotonic()
             self._duration_ms = 0
 
@@ -263,7 +270,10 @@ class DiagnosticController:
         with self._lock:
             if self._state != ApplicationState.RUNNING or self._cancellation is None:
                 return False
-            return self._cancellation.cancel("user_requested")
+            requested = self._cancellation.cancel("user_requested")
+            if requested and self._run_metadata is not None:
+                self._run_metadata["cancel_requested"] = True
+            return requested
 
     def wait(self, timeout: float | None = None) -> bool:
         """Wait for the active worker; return ``False`` on the caller's timeout."""
@@ -327,6 +337,9 @@ class DiagnosticController:
                 _copy_json_object(self._presentation) if self._presentation is not None else None
             )
             error = dict(self._error) if self._error is not None else None
+            run_metadata = dict(self._run_metadata) if self._run_metadata is not None else None
+            if run_metadata is not None and self._cancellation is not None:
+                run_metadata["cancel_requested"] = self._cancellation.is_cancelled
         terminal_events = sum(
             item.get("phase") in {"completed", "failed", "cancelled", "not_run"} for item in events
         )
@@ -346,6 +359,7 @@ class DiagnosticController:
                 "percent": round(processed * 100 / planned) if planned else 0,
                 "events": events,
             },
+            "run": run_metadata,
             "result": presentation,
             "error": error,
         }

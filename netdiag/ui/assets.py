@@ -62,8 +62,8 @@ _INDEX = AssetSpec(
     route="/app/",
     filename="index.html",
     content_type="text/html; charset=utf-8",
-    size=15_582,
-    sha256="b27e843be6481cd49145e36f25b88d6adec05890d735e71837396107fe8a9932",
+    size=8_943,
+    sha256="ad343cc5ef3146f89cf48132be60acaba483f7f1fd21612758e5f936bf905eff",
 )
 
 _SPECS: Final[tuple[AssetSpec, ...]] = (
@@ -79,15 +79,15 @@ _SPECS: Final[tuple[AssetSpec, ...]] = (
         route="/app/styles.css",
         filename="styles.css",
         content_type="text/css; charset=utf-8",
-        size=43_249,
-        sha256="ce35074418b421c7e2648f948975b34785260f9bf2d041c4cf0c27de1427b176",
+        size=24_370,
+        sha256="d1c150fdc6a84287e0eda7724f33e78d505f40988944a0378472e28b58583abb",
     ),
     AssetSpec(
         route="/app/app.js",
         filename="app.js",
         content_type="text/javascript; charset=utf-8",
-        size=59_982,
-        sha256="eeb61a0c6b2dfe6e0b7f6fb3bdbf8df7e17b88ca1f45ff9f01677c59486cd6b5",
+        size=53_427,
+        sha256="6c96b29b3be29dfd9d12c766d32c1b8105b6b9b4ed0b5f0d0bc1a5ab01a78e89",
     ),
     AssetSpec(
         route="/app/icons.svg",

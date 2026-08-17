@@ -1,12 +1,13 @@
 # Lantern Net (`netdiag`)
 
-Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working product today is the `netdiag` command-line utility for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
+Lantern Net is a network troubleshooting project for helping family, friends, and eventually support teams understand what is wrong without changing the computer. The working development build includes the `netdiag` command-line utility and a local browser interface for macOS and Linux. It checks the path from the local connection outward—interface, gateway, internet access, DNS, Wi-Fi, nearby LAN devices, mDNS services, and selected TCP ports—and turns the results into plain-language findings and next steps.
 
 > **Development status:** the current package is `0.3.0.dev0`. It is not production software, a remote-support service, or an automatic repair tool. Use it only on computers and networks you own or are authorized to test.
 
 ## What works today
 
 - A usable macOS and Linux CLI with bounded network probes and per-check failure isolation.
+- A modern local UI launched with `netdiag ui`. It binds only to this computer, starts nothing automatically, defaults to passive observation, and requires fresh consent for each run.
 - Human-readable reports with an overall assessment, coverage, findings, and suggested next steps.
 - Typed JSON reports using the additive `1.1` report schema, including stable finding codes, structured evidence, confidence, and check outcomes.
 - A share-safe `--redact` mode for full reports. It structurally removes or replaces sensitive identifiers instead of relying on text replacement.
@@ -15,8 +16,6 @@ Lantern Net is a network troubleshooting project for helping family, friends, an
 
 The project also contains safety foundations for the intended future product. These are not yet connected end-user features:
 
-- A consent-bound application runtime with fixed diagnostic activity levels and cancellation support.
-- A packaged modern UI prototype and a hardened loopback-only transport. The UI is intentionally disconnected from the CLI while its launch and session flow is completed and tested.
 - A typed remediation planner and dry-run lifecycle. No real machine-changing repair is registered, and there is no `apply` command or credential collection.
 - Read-only rescue assessment models and reviewed manual guidance. Lantern does not currently boot a computer, enter Safe Mode or Recovery, repair a disk, unlock encrypted data, or determine hardware viability on its own.
 - Security building blocks for a future LAN support mode. Non-loopback serving is hard-disabled, so this build cannot expose Lantern to another device on the network.
@@ -42,6 +41,18 @@ Confirm the installed build:
 ```bash
 netdiag --version
 ```
+
+## Open the local interface
+
+Launch the development UI:
+
+```bash
+netdiag ui
+```
+
+Lantern opens a private, temporary browser session on this computer. The launch link is single-use, the service listens only on loopback, and the process closes when the session ends or reaches its time limit. No check starts until you choose a profile and select **Start check**.
+
+The default profile only reads local route, interface, Wi-Fi, and neighbor state. **Include basic network checks** opts that one run into small public reachability, DNS, and gateway-service probes. A brief mDNS browse is a separate choice. The UI cannot sweep the LAN, accept credentials, apply fixes, expose remote access, or upload/share a report in this build.
 
 ## Run and share a report
 
@@ -69,6 +80,7 @@ netdiag run --json --redact > netdiag-report.json
 
 | Command | What it checks |
 |---|---|
+| `netdiag ui` | Opens the consent-based, loopback-only local interface |
 | `netdiag run` | Full layered diagnostic report |
 | `netdiag dns [DOMAIN]` | Resolver answers, likely blocking, failures, and response time |
 | `netdiag wifi` | Association, signal, band, channel, rate, and security when the platform exposes them |
@@ -122,13 +134,13 @@ Raw JSON can contain device and network identifiers. Prefer `netdiag run --json 
 
 Diagnostics do not change system or network configuration, but several checks still generate ordinary network traffic. DNS and internet-path checks contact their displayed targets; mDNS browses the local network; `ports` attempts TCP connections to the explicit host; and `lan --ping` actively probes the detected subnet. Use active checks only within an authorized scope.
 
-No report is uploaded by `netdiag`. The current CLI does not accept passwords, tokens, recovery keys, or router credentials. It does not install persistence, elevate privileges, execute arbitrary scripts, or open a LAN listener.
+No report is uploaded by `netdiag`. The CLI and local UI provide no fields for passwords, API tokens, recovery keys, or router credentials. They do not install persistence, elevate privileges, execute arbitrary scripts, or open a LAN listener. The UI service binds to `127.0.0.1` on an operating-system-selected port, uses a unique per-launch `*.localhost` hostname, and expires automatically; that is local browser access, not remote support.
 
 ## Platform support
 
 The diagnostic CLI currently supports macOS and Linux and uses native operating-system tools when available. Missing tools or restricted operating-system access are reported as unsupported or inconclusive instead of being presented as successful checks.
 
-- **macOS:** route and interface tools, System Configuration data, available Wi-Fi tools, PF_ROUTE neighbor data, Bonjour, ping, and `dig`.
+- **macOS:** route and interface tools, System Configuration data, available Wi-Fi tools, PF_ROUTE neighbor data, Bonjour, ping, and `dig`. Some modern app/process contexts restrict link-layer neighbor details; Lantern reports that as partial coverage rather than a network failure. Restoring full visibility will require a separately reviewed, signed native capability—not a whole-app Python re-execution.
 - **Linux:** `ip`, `resolvectl`, NetworkManager/`nmcli`, available Wi-Fi tools, Avahi, ping, and `dig`.
 
 Specific-resolver DNS comparison requires `dig`. Without it, system DNS can still use Python's resolver, and Lantern reports when it cannot query a chosen resolver rather than silently substituting another server.

@@ -28,6 +28,7 @@ class RouteInfo:
     default_iface: str | None
     interfaces: list[Interface]
     has_default_route: bool | None = None
+    collector_status: str = "ok"
 
 
 def _ping_host(host: str, count: int = 3) -> tuple[bool, str]:
@@ -48,12 +49,20 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
     gateway: str | None = None
     iface: str | None = None
     has_default_route = False
+    collector_status = "ok"
 
     if osinfo.is_mac:
         text = run_ok(["route", "-n", "get", "default"], timeout=10)
-        gateway = first_match(r"^\s*gateway:\s*(\d+\.\d+\.\d+\.\d+)", text)
-        iface = first_match(r"^\s*interface:\s*(\S+)", text)
-        has_default_route = bool(gateway or iface)
+        if text.startswith("(command failed:"):
+            collector_status = "failed"
+            has_default_route = None
+        else:
+            gateway = first_match(r"^\s*gateway:\s*(\d+\.\d+\.\d+\.\d+)", text)
+            iface = first_match(r"^\s*interface:\s*(\S+)", text)
+            has_default_route = bool(gateway or iface)
+            if not has_default_route:
+                collector_status = "failed"
+                has_default_route = None
         if_text = run_ok(["ifconfig"], timeout=10)
         for block in re.split(r"\n(?=\S)", if_text):
             name = block.split(":")[0].split()[0]
@@ -76,11 +85,15 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                 interfaces.append(Interface(name, addrs, state, networks))
     else:
         text = run_ok(["ip", "-4", "route"], timeout=10)
-        default_line = first_match(r"^(default\b.*)$", text)
-        has_default_route = default_line is not None
-        if default_line:
-            gateway = first_match(r"\bvia (\d+\.\d+\.\d+\.\d+)", default_line)
-            iface = first_match(r"\bdev (\S+)", default_line)
+        if text.startswith("(command failed:"):
+            collector_status = "failed"
+            has_default_route = None
+        else:
+            default_line = first_match(r"^(default\b.*)$", text)
+            has_default_route = default_line is not None
+            if default_line:
+                gateway = first_match(r"\bvia (\d+\.\d+\.\d+\.\d+)", default_line)
+                iface = first_match(r"\bdev (\S+)", default_line)
         addr_text = run_ok(["ip", "-4", "addr"], timeout=10)
         for block in re.split(r"\n(?=\d+:)", addr_text):
             m = re.match(r"\d+:\s+(\S+?):", block)
@@ -100,7 +113,7 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
                     Interface(name, addrs, "up" if "UP" in block else "down", networks)
                 )
 
-    return RouteInfo(gateway, iface, interfaces, has_default_route)
+    return RouteInfo(gateway, iface, interfaces, has_default_route, collector_status)
 
 
 def is_virtual_bridge_interface(name: str) -> bool:
@@ -158,11 +171,13 @@ def check_routing(osinfo: OSInfo, *, network_probes: bool = True) -> tuple[list[
         raise TypeError("network_probes must be a boolean")
     findings: list[Finding] = []
     routes = get_routes(osinfo)
-    has_default_route = (
-        routes.has_default_route
-        if routes.has_default_route is not None
-        else bool(routes.default_gateway or routes.default_iface)
-    )
+    has_default_route = None
+    if routes.collector_status == "ok":
+        has_default_route = (
+            routes.has_default_route
+            if routes.has_default_route is not None
+            else bool(routes.default_gateway or routes.default_iface)
+        )
     data = {
         "default_gateway": routes.default_gateway,
         "default_interface": routes.default_iface,
@@ -177,22 +192,48 @@ def check_routing(osinfo: OSInfo, *, network_probes: bool = True) -> tuple[list[
             for i in routes.interfaces
         ],
         "network_probes": network_probes,
+        "collector_status": routes.collector_status,
     }
+
+    if routes.collector_status != "ok":
+        data["connectivity_status"] = "not_run"
+        findings.append(
+            make_finding(
+                "NDG.ROUTE.CHECK_FAILED",
+                Severity.WARN,
+                OutcomeStatus.INCONCLUSIVE,
+                parameters={"error_summary": "local route inventory was unavailable"},
+                confidence=ConfidenceLevel.HIGH,
+                rationale="The fixed platform route command did not provide usable inventory.",
+            )
+        )
+        return findings, data
 
     if not has_default_route:
         findings.append(
             make_finding(
                 "NDG.ROUTE.DEFAULT_ROUTE_MISSING",
-                Severity.CRIT,
-                OutcomeStatus.FAILED,
+                Severity.WARN,
+                OutcomeStatus.INCONCLUSIVE,
                 confidence=ConfidenceLevel.HIGH,
-                rationale="The platform route table contained no default route.",
+                rationale="The inspected IPv4 route table contained no default route.",
             )
         )
         return findings, data
 
     if not network_probes:
         data["connectivity_status"] = "not_run"
+        findings.append(
+            make_finding(
+                "NDG.ROUTE.DEFAULT_ROUTE_OBSERVED",
+                Severity.INFO,
+                OutcomeStatus.INFORMATIONAL,
+                confidence=ConfidenceLevel.HIGH,
+                rationale=(
+                    "The IPv4 route table exposed a default route; no network probe was run."
+                ),
+            )
+        )
         return findings, data
 
     gateway_ping_ok: bool | None = None

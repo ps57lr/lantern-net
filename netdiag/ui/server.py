@@ -1,11 +1,8 @@
 """Hardened loopback-only HTTP transport for Lantern's local interface.
 
-The transport intentionally exposes only packaged static assets, health,
-session bootstrap/revocation, and a read-only status provider.  It has no host
-parameter, no LAN mode, no credential input, and no remediation route.
-
-This backend is intentionally not wired to the CLI until the static client
-implements and tests fragment exchange plus immediate browser-history cleanup.
+The transport exposes packaged static assets, health, session lifecycle, and
+two exact consent-bound diagnostic profiles.  It has no host parameter, no LAN
+listener, no credential input, no active discovery, and no remediation route.
 """
 
 from __future__ import annotations
@@ -21,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Final
 from urllib.parse import urlsplit
 
+from netdiag.application import ControllerClosed, ScanAlreadyRunning
+
 from .assets import (
     STATIC_SECURITY_HEADERS,
     AssetIntegrityError,
@@ -28,7 +27,15 @@ from .assets import (
     load_asset,
     verify_asset_manifest,
 )
-from .controller import JsonValue, ReadyStatusProvider, StatusProvider
+from .controller import (
+    DiagnosticService,
+    InvalidDiagnosticRequest,
+    JsonValue,
+    LocalDiagnosticService,
+    ReadyStatusProvider,
+    StatusProvider,
+    validate_start_request,
+)
 from .security import (
     CSRF_HEADER_NAME,
     SESSION_COOKIE_NAME,
@@ -40,6 +47,7 @@ _MAX_REQUEST_BODY: Final[int] = 4096
 _MAX_RESPONSE_BODY: Final[int] = 512 * 1024
 _READ_TIMEOUT_SECONDS: Final[float] = 2.0
 _SHUTDOWN_TIMEOUT_SECONDS: Final[float] = 3.0
+_MAX_LOCAL_LIFETIME_SECONDS: Final[float] = 20 * 60
 
 _COMMON_HEADERS: Final[Mapping[str, str]] = {
     **STATIC_SECURITY_HEADERS,
@@ -54,6 +62,7 @@ class _Response:
     body: bytes
     content_type: str
     headers: tuple[tuple[str, str], ...] = ()
+    after_write: Callable[[], None] | None = None
 
 
 def _json_bytes(value: object) -> bytes:
@@ -71,12 +80,14 @@ def _json_response(
     value: object,
     *,
     headers: tuple[tuple[str, str], ...] = (),
+    after_write: Callable[[], None] | None = None,
 ) -> _Response:
     return _Response(
         status=status,
         body=_json_bytes(value),
         content_type="application/json; charset=utf-8",
         headers=headers,
+        after_write=after_write,
     )
 
 
@@ -94,6 +105,35 @@ def _error_response(
     )
 
 
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON constant")
+
+
+def _validate_json_structure(value: object) -> None:
+    """Bound nesting and node count before route-specific validation."""
+
+    pending: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while pending:
+        item, depth = pending.pop()
+        nodes += 1
+        if nodes > 128 or depth > 8:
+            raise ValueError("JSON structure exceeds its budget")
+        if isinstance(item, dict):
+            pending.extend((nested, depth + 1) for nested in item.values())
+        elif isinstance(item, list):
+            pending.extend((nested, depth + 1) for nested in item)
+
+
 class LocalApplication:
     """Pure request policy shared by every local HTTP handler thread."""
 
@@ -104,7 +144,9 @@ class LocalApplication:
         expected_origin: str,
         security: LocalSessionSecurity,
         status_provider: StatusProvider,
+        diagnostic_service: DiagnosticService | None = None,
         on_launch_consumed: Callable[[], None] | None = None,
+        on_revoke_written: Callable[[], None] | None = None,
         max_request_body: int = _MAX_REQUEST_BODY,
         max_response_body: int = _MAX_RESPONSE_BODY,
     ) -> None:
@@ -116,7 +158,9 @@ class LocalApplication:
         self.expected_origin = expected_origin
         self.security = security
         self.status_provider = status_provider
+        self.diagnostic_service = diagnostic_service
         self.on_launch_consumed = on_launch_consumed
+        self.on_revoke_written = on_revoke_written
         self.max_request_body = max_request_body
         self.max_response_body = max_response_body
 
@@ -241,6 +285,10 @@ class LocalApplication:
             return self._exchange(request)
         if path == "/api/session/revoke":
             return self._revoke(request)
+        if path == "/api/diagnostics/start":
+            return self._start_diagnostic(request)
+        if path == "/api/diagnostics/cancel":
+            return self._cancel_diagnostic(request)
         return _error_response(
             405,
             "method_not_allowed",
@@ -291,26 +339,122 @@ class LocalApplication:
         )
 
     def _revoke(self, request: _LocalRequestHandler) -> _Response:
+        _session_id, authorization_error = self._authorize_mutation(request)
+        if authorization_error is not None:
+            return authorization_error
         body, body_error = self._read_json_object(request)
         if body_error is not None:
             return body_error
         if body:
             return _error_response(400, "invalid_request", "The revoke request is invalid.")
 
-        session_id = self._session_cookie(request)
-        if self.security.authenticate(session_id) is None:
-            return self._unauthorized(clear_cookie=True)
-
-        csrf_values = request.headers.get_all(CSRF_HEADER_NAME, failobj=[])
-        if len(csrf_values) != 1 or not self.security.verify_csrf(session_id, csrf_values[0]):
-            return _error_response(403, "csrf_denied", "The request could not be verified.")
-
+        session_id = _session_id
+        assert session_id is not None
         self.security.revoke(session_id)
         return _json_response(
             200,
             {"revoked": True},
             headers=(("Set-Cookie", self._clear_cookie_header()),),
+            after_write=self.on_revoke_written,
         )
+
+    def _start_diagnostic(self, request: _LocalRequestHandler) -> _Response:
+        _session_id, authorization_error = self._authorize_mutation(request)
+        if authorization_error is not None:
+            return authorization_error
+        body, body_error = self._read_json_object(request)
+        if body_error is not None:
+            return body_error
+        try:
+            validate_start_request(body)
+        except InvalidDiagnosticRequest:
+            return _error_response(400, "invalid_request", "The diagnostic request is invalid.")
+        service = self.diagnostic_service
+        if service is None:
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are not available in this application session.",
+            )
+        try:
+            service.start(body)
+        except InvalidDiagnosticRequest:
+            return _error_response(400, "invalid_request", "The diagnostic request is invalid.")
+        except ScanAlreadyRunning:
+            return _error_response(
+                409,
+                "diagnostic_running",
+                "A diagnostic check is already in progress.",
+            )
+        except (ControllerClosed, RuntimeError):
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are temporarily unavailable.",
+            )
+        except Exception:  # noqa: BLE001 - service details never cross HTTP.
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are temporarily unavailable.",
+            )
+        return _json_response(202, {"accepted": True})
+
+    def _cancel_diagnostic(self, request: _LocalRequestHandler) -> _Response:
+        _session_id, authorization_error = self._authorize_mutation(request)
+        if authorization_error is not None:
+            return authorization_error
+        body, body_error = self._read_json_object(request)
+        if body_error is not None:
+            return body_error
+        if body:
+            return _error_response(400, "invalid_request", "The cancel request is invalid.")
+        service = self.diagnostic_service
+        if service is None:
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are not available in this application session.",
+            )
+        try:
+            requested = service.cancel()
+        except (ControllerClosed, RuntimeError):
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are temporarily unavailable.",
+            )
+        except Exception:  # noqa: BLE001 - service details never cross HTTP.
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are temporarily unavailable.",
+            )
+        if type(requested) is not bool:
+            return _error_response(
+                503,
+                "diagnostics_unavailable",
+                "Local diagnostics are temporarily unavailable.",
+            )
+        return _json_response(200, {"cancel_requested": requested})
+
+    def _authorize_mutation(
+        self,
+        request: _LocalRequestHandler,
+    ) -> tuple[str | None, _Response | None]:
+        """Apply one exact cookie/session/CSRF policy to every mutation."""
+
+        session_id = self._session_cookie(request)
+        if self.security.authenticate(session_id) is None:
+            return None, self._unauthorized(clear_cookie=True)
+        csrf_values = request.headers.get_all(CSRF_HEADER_NAME, failobj=[])
+        if len(csrf_values) != 1 or not self.security.verify_csrf(session_id, csrf_values[0]):
+            return None, _error_response(
+                403,
+                "csrf_denied",
+                "The request could not be verified.",
+            )
+        return session_id, None
 
     def _read_json_object(
         self, request: _LocalRequestHandler
@@ -348,8 +492,13 @@ class LocalApplication:
         if len(raw) != length:
             return {}, _error_response(400, "invalid_body", "The request body is invalid.")
         try:
-            value = json.loads(raw.decode("utf-8", errors="strict"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            value = json.loads(
+                raw.decode("utf-8", errors="strict"),
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_json_constant,
+            )
+            _validate_json_structure(value)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             return {}, _error_response(400, "invalid_json", "The request JSON is invalid.")
         if not isinstance(value, dict):
             return {}, _error_response(400, "invalid_request", "A JSON object is required.")
@@ -366,7 +515,7 @@ class LocalApplication:
             # json.dumps accepts NaN when nested custom float subclasses can
             # evade casual validation; explicitly reject all non-finite values.
             self._reject_non_finite(snapshot)
-        except (TypeError, ValueError, OverflowError):
+        except Exception:  # noqa: BLE001 - provider failures are a generic 503.
             return _error_response(
                 503,
                 "status_unavailable",
@@ -558,6 +707,12 @@ class _LocalRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (TimeoutError, BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
+            return
+        if response.after_write is not None:
+            try:
+                response.after_write()
+            except Exception:  # noqa: BLE001 - post-write hooks never alter the response.
+                return
 
     def log_message(self, format: str, *args: object) -> None:
         # Request targets can contain the one-use launch token if a caller
@@ -572,19 +727,40 @@ class LanternLocalServer:
         self,
         *,
         status_provider: StatusProvider | None = None,
+        diagnostic_service: DiagnosticService | None = None,
         security: LocalSessionSecurity | None = None,
         request_timeout: float = _READ_TIMEOUT_SECONDS,
+        max_lifetime_seconds: float = _MAX_LOCAL_LIFETIME_SECONDS,
     ) -> None:
         if request_timeout <= 0 or request_timeout > 10:
             raise ValueError("request timeout must be between zero and ten seconds")
-        self._status_provider = status_provider or ReadyStatusProvider()
+        if (
+            isinstance(max_lifetime_seconds, bool)
+            or not isinstance(max_lifetime_seconds, (int, float))
+            or not math.isfinite(max_lifetime_seconds)
+            or max_lifetime_seconds <= 0
+            or max_lifetime_seconds > 3600
+        ):
+            raise ValueError(
+                "maximum local lifetime must be greater than zero and at most one hour"
+            )
+        if status_provider is not None and diagnostic_service is not None:
+            raise ValueError("provide either a status provider or a diagnostic service")
+        self._status_provider = status_provider
+        self._diagnostic_service = diagnostic_service
+        self._owns_diagnostic_service = status_provider is None and diagnostic_service is None
         self._security = security or LocalSessionSecurity()
         self._request_timeout = request_timeout
+        self._max_lifetime_seconds = float(max_lifetime_seconds)
         self._server: _LoopbackHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._lifetime_thread: threading.Thread | None = None
         self._origin: str | None = None
         self._launch_url: str | None = None
         self._state_lock = threading.RLock()
+        self._shutdown_requested = threading.Event()
+        self._lifecycle_complete = threading.Event()
+        self._lifecycle_failed = threading.Event()
 
     @property
     def origin(self) -> str:
@@ -610,20 +786,62 @@ class LanternLocalServer:
         thread = self._thread
         return thread is not None and thread.is_alive()
 
+    @property
+    def shutdown_requested(self) -> bool:
+        """Whether a successful revoke response requested application shutdown."""
+
+        return self._shutdown_requested.is_set()
+
+    @property
+    def lifecycle_failed(self) -> bool:
+        """Whether bounded automatic cleanup failed without exposing details."""
+
+        return self._lifecycle_failed.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for browser revocation without closing the server in a handler."""
+
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("timeout must be a non-negative finite number or None")
+        self._lifecycle_complete.wait(timeout)
+        return self._shutdown_requested.is_set()
+
     def start(self) -> LanternLocalServer:
         with self._state_lock:
             if self._server is not None:
-                raise RuntimeError("local server is already running")
+                if self.is_running:
+                    return self
+                raise RuntimeError("local server is not running cleanly")
 
-            # Fail closed before opening a socket if any packaged UI byte has
-            # changed from the reviewed manifest.
+            self._shutdown_requested.clear()
+            self._lifecycle_complete.clear()
+            self._lifecycle_failed.clear()
+
+            # Fail closed before constructing application state or opening a
+            # socket if any packaged UI byte changed from the reviewed manifest.
             verify_asset_manifest()
+            diagnostic_service = self._diagnostic_service
             server = _LoopbackHTTPServer(
                 (_LOOPBACK_HOST, 0),
                 application=None,
                 request_timeout=self._request_timeout,
             )
             try:
+                if self._owns_diagnostic_service and diagnostic_service is None:
+                    diagnostic_service = LocalDiagnosticService()
+                    self._diagnostic_service = diagnostic_service
+                if self._status_provider is not None:
+                    status_provider = self._status_provider
+                elif diagnostic_service is not None:
+                    status_provider = diagnostic_service
+                else:
+                    status_provider = ReadyStatusProvider()
+
                 bound_host, bound_port = server.server_address[:2]
                 if bound_host != _LOOPBACK_HOST:
                     raise RuntimeError("local server did not bind to literal loopback")
@@ -637,8 +855,10 @@ class LanternLocalServer:
                     expected_host=f"{application_host}:{bound_port}",
                     expected_origin=origin,
                     security=self._security,
-                    status_provider=self._status_provider,
+                    status_provider=status_provider,
+                    diagnostic_service=diagnostic_service,
                     on_launch_consumed=self._mark_launch_consumed,
+                    on_revoke_written=self._mark_shutdown_requested,
                 )
                 server.application = application
                 launch_url = f"{origin}/app/#launch={launch_token}"
@@ -653,12 +873,27 @@ class LanternLocalServer:
             except BaseException:
                 self._security.revoke_all()
                 server.server_close()
+                if self._owns_diagnostic_service and diagnostic_service is not None:
+                    diagnostic_service.close(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+                    self._diagnostic_service = None
                 raise
 
             self._server = server
             self._thread = thread
             self._origin = origin
             self._launch_url = launch_url
+            lifetime_thread = threading.Thread(
+                target=self._expire_at_lifetime_boundary,
+                name=f"lantern-lifetime-{bound_port}",
+                daemon=True,
+            )
+            self._lifetime_thread = lifetime_thread
+            try:
+                lifetime_thread.start()
+            except BaseException:
+                self._lifetime_thread = None
+                self.close()
+                raise
             return self
 
     @staticmethod
@@ -684,24 +919,61 @@ class LanternLocalServer:
             if self._origin is not None:
                 self._launch_url = f"{self._origin}/app/"
 
+    def _mark_shutdown_requested(self) -> None:
+        """Wake the outer lifecycle only after the revoke response is written."""
+
+        self._shutdown_requested.set()
+        self._lifecycle_complete.set()
+
+    def _expire_at_lifetime_boundary(self) -> None:
+        """Close even if the browser disappears without revoking its session."""
+
+        if not self._lifecycle_complete.wait(self._max_lifetime_seconds):
+            try:
+                self.close()
+            except BaseException:  # noqa: BLE001 - never print daemon cleanup details.
+                self._lifecycle_failed.set()
+                self._lifecycle_complete.set()
+
     def close(self) -> None:
         with self._state_lock:
             server = self._server
             thread = self._thread
+            lifetime_thread = self._lifetime_thread
             self._server = None
             self._thread = None
+            self._lifetime_thread = None
             self._origin = None
             self._launch_url = None
+            owned_service = self._diagnostic_service if self._owns_diagnostic_service else None
+            if self._owns_diagnostic_service:
+                self._diagnostic_service = None
+            self._lifecycle_complete.set()
 
         self._security.revoke_all()
-        if server is None:
-            return
-        server.shutdown()
-        server.server_close()
-        if thread is not None:
-            thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-            if thread.is_alive():
-                raise RuntimeError("local server did not shut down cleanly")
+        shutdown_error: RuntimeError | None = None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+            if thread is not None:
+                thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+                if thread.is_alive():
+                    shutdown_error = RuntimeError("local server did not shut down cleanly")
+        if owned_service is not None:
+            try:
+                service_closed = owned_service.close(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001 - normalize controller cleanup failures.
+                service_closed = False
+            if type(service_closed) is not bool or not service_closed:
+                shutdown_error = shutdown_error or RuntimeError(
+                    "local diagnostic service did not shut down cleanly"
+                )
+        if lifetime_thread is not None and lifetime_thread is not threading.current_thread():
+            lifetime_thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+            if lifetime_thread.is_alive() and shutdown_error is None:
+                shutdown_error = RuntimeError("local lifetime guard did not shut down cleanly")
+        if shutdown_error is not None:
+            raise shutdown_error
 
     def __enter__(self) -> LanternLocalServer:  # noqa: PYI034 - Python 3.10 has no Self
         return self.start()

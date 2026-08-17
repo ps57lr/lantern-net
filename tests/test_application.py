@@ -22,7 +22,11 @@ from netdiag.core.status import ConfidenceLevel, ExecutionStatus, OutcomeStatus
 from netdiag.models import Report, Severity
 from netdiag.platform import OSInfo
 from netdiag.scanner import ScanCollectors, ScanProgress, run_full_scan, run_policy_scan
-from netdiag.ui.controller import StatusProvider
+from netdiag.ui.controller import (
+    InvalidDiagnosticRequest,
+    LocalDiagnosticService,
+    StatusProvider,
+)
 
 OS_INFO = OSInfo("Darwin", "test", "arm64")
 ROUTE_DATA: dict[str, Any] = {
@@ -576,6 +580,128 @@ def test_cancelled_controller_keeps_completed_summary_and_closes_deterministical
     snapshot = controller.snapshot()
 
     assert snapshot["state"] == "cancelled"
+    assert snapshot["run"]["cancel_requested"] is True
     assert snapshot["result"] is not None
     assert snapshot["result"]["coverage"]["cancelled"] == 1
     assert controller.close(timeout=0.1)
+
+
+def test_controller_snapshot_contains_only_fixed_safe_run_metadata() -> None:
+    controller = DiagnosticController(
+        collectors=FakeCollectors().bundle(),
+        executor=ImmediateExecutor(),
+    )
+    record = issue_consent(
+        consent_id="consent.runtime.metadata",
+        scan_id="scan.runtime.metadata",
+        goal=DiagnosticGoal.PROBLEM,
+        basic_network_checks=False,
+    )
+
+    controller.start(record, include_mdns=False)
+    snapshot = controller.snapshot()
+
+    assert snapshot["run"] == {
+        "goal": "problem",
+        "profile": "passive",
+        "include_mdns": False,
+        "cancel_requested": False,
+    }
+    encoded = json.dumps(snapshot)
+    assert "consent.runtime.metadata" not in encoded
+    assert "scan.runtime.metadata" not in encoded
+
+
+def test_local_service_issues_fresh_server_ids_and_exact_fifteen_minute_consent() -> None:
+    captured = []
+
+    class CapturingController(DiagnosticController):
+        def start(self, record, *, include_mdns=True):
+            captured.append((record, include_mdns))
+
+    service = LocalDiagnosticService(CapturingController())
+    service.start({"goal": "network", "profile": "passive", "include_mdns": False})
+
+    record, include_mdns = captured[0]
+    assert record.consent_id.startswith("consent.ui.")
+    assert record.scan_id.startswith("scan.ui.")
+    assert record.consent_id != record.scan_id
+    assert (record.expires_at - record.issued_at).total_seconds() == 900
+    assert record.activity == ActivityLevel.PASSIVE
+    assert include_mdns is False
+
+
+@pytest.mark.parametrize(
+    "start_request",
+    [
+        {},
+        {"goal": "network", "profile": "passive"},
+        {
+            "goal": "network",
+            "profile": "passive",
+            "include_mdns": False,
+            "target": "192.168.50.20",
+        },
+        {"goal": "network", "profile": "active_discovery", "include_mdns": False},
+        {"goal": "network", "profile": "passive", "include_mdns": True},
+        {"goal": "network", "profile": "passive", "include_mdns": 0},
+        {"goal": True, "profile": "passive", "include_mdns": False},
+        {"goal": "network", "profile": ["passive"], "include_mdns": False},
+        {
+            "goal": "network",
+            "profile": "passive",
+            "include_mdns": False,
+            "credential": "password=hunter2",
+        },
+        {
+            "goal": "network",
+            "profile": "passive",
+            "include_mdns": False,
+            "command": "rm -rf",
+        },
+    ],
+)
+def test_local_service_rejects_missing_unknown_active_and_type_confused_requests(
+    start_request: dict[str, object],
+) -> None:
+    service = LocalDiagnosticService(DiagnosticController(executor=ImmediateExecutor()))
+
+    with pytest.raises(InvalidDiagnosticRequest) as exc_info:
+        service.start(start_request)
+    assert "hunter2" not in str(exc_info.value)
+
+
+def test_local_service_passive_profile_never_calls_network_capable_collectors() -> None:
+    fake = FakeCollectors()
+    controller = DiagnosticController(
+        collectors=fake.bundle(),
+        executor=ImmediateExecutor(),
+    )
+    service = LocalDiagnosticService(controller)
+
+    service.start({"goal": "problem", "profile": "passive", "include_mdns": False})
+
+    assert fake.calls == [
+        "platform",
+        ("routing", False),
+        "wifi",
+        ("lan", False, 256),
+    ]
+    assert service.snapshot()["transport"] == "loopback"
+
+
+def test_local_service_low_impact_profile_never_authorizes_active_lan_ping() -> None:
+    fake = FakeCollectors()
+    controller = DiagnosticController(
+        collectors=fake.bundle(),
+        executor=ImmediateExecutor(),
+    )
+    service = LocalDiagnosticService(controller)
+
+    service.start({"goal": "network", "profile": "low_impact_network", "include_mdns": True})
+
+    assert ("routing", True) in fake.calls
+    assert "dns" in fake.calls
+    assert "mdns" in fake.calls
+    assert ("ports", "192.168.50.1", (53, 80, 443, 8080, 8443)) in fake.calls
+    assert not any(isinstance(call, tuple) and call[0] == "active_ping" for call in fake.calls)

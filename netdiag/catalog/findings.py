@@ -18,9 +18,15 @@ _DEFINITIONS = (
     FindingDefinition(
         "NDG.ROUTE.DEFAULT_ROUTE_MISSING",
         "route",
-        "No default route",
-        "This machine has no default route, so an Internet path was not available.",
-        "Check cable or Wi-Fi association and DHCP settings.",
+        "No IPv4 default route observed",
+        "The inspected IPv4 route table had no default path. IPv6 and Internet reachability were not tested.",
+        "Check the local connection and IPv4 configuration before changing network settings.",
+    ),
+    FindingDefinition(
+        "NDG.ROUTE.DEFAULT_ROUTE_OBSERVED",
+        "route",
+        "Local default route observed",
+        "The local IPv4 route table has a default path. Internet and DNS reachability were not tested.",
     ),
     FindingDefinition(
         "NDG.ROUTE.OUTBOUND_HTTPS_REACHABLE",

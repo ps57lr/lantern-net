@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import re
+import selectors
+import subprocess
+import time
 from decimal import Decimal, InvalidOperation
 
 from netdiag.catalog import make_finding
 from netdiag.core.status import ConfidenceLevel, OutcomeStatus
 from netdiag.findings import Finding, Severity
 from netdiag.platform import OSInfo, first_match, run_ok, which
+
+_MAC_NETWORKSETUP = "/usr/sbin/networksetup"
+_MAC_IPCONFIG = "/usr/sbin/ipconfig"
+_MAC_WDUTIL = "/usr/bin/wdutil"
+_MAC_AIRPORT = (
+    "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+)
+_MAC_WIFI_INTERFACE = re.compile(r"en(?:0|[1-9][0-9]{0,2})\Z")
+_MAC_PRIVATE_VALUE = "<redacted>"
+_MAC_COMMAND_MAX_BYTES = 32 * 1024
+_MAC_COMMAND_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "LANG": "C",
+}
 
 
 def check_wifi(osinfo: OSInfo) -> tuple[list[Finding], dict]:
@@ -33,22 +52,29 @@ def check_wifi(osinfo: OSInfo) -> tuple[list[Finding], dict]:
         return findings, data
 
     if not data.get("connected") and osinfo.is_mac:
-        hw = run_ok(["networksetup", "-listallhardwareports"], timeout=5)
-        m = re.search(r"Hardware Port: Wi-Fi\s+Device: (\S+)", hw)
-        wifi_dev = m.group(1) if m else "en0"
-        ns = run_ok(["networksetup", "-getairportnetwork", wifi_dev], timeout=5)
-        if "Current Wi-Fi Network:" in ns:
-            data["connected"] = True
-            data["ssid"] = ns.split("Current Wi-Fi Network:")[-1].strip()
-            data["interface"] = wifi_dev
+        hw = _run_macos_command((_MAC_NETWORKSETUP, "-listallhardwareports"))
+        wifi_dev = _parse_macos_wifi_interface(hw)
+        if wifi_dev is not None:
+            ns = _run_macos_command((_MAC_NETWORKSETUP, "-getairportnetwork", wifi_dev))
+            prefix = "Current Wi-Fi Network:"
+            if ns.startswith(prefix) and "\n" not in ns.rstrip("\n"):
+                ssid = ns[len(prefix) :].strip()
+                if _bounded_text(ssid, maximum=255) is not None:
+                    data["connected"] = True
+                    data["ssid"] = ssid
+                    data["interface"] = wifi_dev
+
+            if not data.get("connected"):
+                summary = _run_macos_command((_MAC_IPCONFIG, "getsummary", wifi_dev))
+                fallback = _parse_macos_ipconfig_summary(summary, interface=wifi_dev)
+                if fallback.get("connected") is True:
+                    data.update(fallback)
         # Signal details via airport when SSID known
-        if data.get("connected") and not data.get("rssi"):
-            airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-            if __import__("os").path.isfile(airport):
-                text = run_ok([airport, "-I"], timeout=10)
-                data["rssi"] = first_match(r"\sagrCtlRSSI:\s*(-?\d+)", text)
-                data["channel"] = first_match(r"\schannel:\s*(\S+)", text)
-                data["tx_rate"] = first_match(r"\slastTxRate:\s*(\d+)", text)
+        if data.get("connected") and not data.get("rssi") and os.path.isfile(_MAC_AIRPORT):
+            text = _run_macos_command((_MAC_AIRPORT, "-I"), timeout=10)
+            data["rssi"] = first_match(r"\sagrCtlRSSI:\s*(-?\d+)", text)
+            data["channel"] = first_match(r"\schannel:\s*(\S+)", text)
+            data["tx_rate"] = first_match(r"\slastTxRate:\s*(\d+)", text)
 
     # Treat platform command output as untrusted input.  Findings contain a
     # handful of PUBLIC fields, so normalize the complete observation before
@@ -149,6 +175,208 @@ def check_wifi(osinfo: OSInfo) -> tuple[list[Finding], dict]:
     return findings, data
 
 
+def _run_macos_command(command: tuple[str, ...], *, timeout: float = 5.0) -> str:
+    """Run one fixed passive macOS inventory command with no ambient Python state."""
+
+    if (
+        type(command) is not tuple
+        or not command
+        or any(type(part) is not str or not part for part in command)
+        or isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 < timeout <= 10
+    ):
+        return ""
+    exact = command in {
+        (_MAC_NETWORKSETUP, "-listallhardwareports"),
+        (_MAC_WDUTIL, "info"),
+        (_MAC_AIRPORT, "-I"),
+    }
+    scoped = (
+        len(command) == 3
+        and command[:2]
+        in {
+            (_MAC_NETWORKSETUP, "-getairportnetwork"),
+            (_MAC_IPCONFIG, "getsummary"),
+        }
+        and _MAC_WIFI_INTERFACE.fullmatch(command[2]) is not None
+    )
+    if not exact and not scoped:
+        return ""
+    try:
+        process = subprocess.Popen(
+            list(command),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            close_fds=True,
+            cwd="/",
+            env=dict(_MAC_COMMAND_ENV),
+            bufsize=0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    output = _capture_macos_output(process, timeout=float(timeout))
+    if output is None:
+        return ""
+    try:
+        return output.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _stop_macos_process(process: subprocess.Popen[bytes]) -> None:
+    stream = process.stdout
+    if stream is not None:
+        try:
+            stream.close()
+        except OSError:
+            pass
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=0.2)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
+        # A signal race can report that the process disappeared before wait.
+        # Still make the final bounded wait attempt below.
+        pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=0.5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _capture_macos_output(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+) -> bytes | None:
+    """Read a child pipe incrementally and kill/reap at the hard byte/time bounds."""
+
+    stream = process.stdout
+    if stream is None:
+        _stop_macos_process(process)
+        return None
+    selector = selectors.DefaultSelector()
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    try:
+        selector.register(stream, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_macos_process(process)
+                return None
+            events = selector.select(min(remaining, 0.1))
+            if not events:
+                continue
+            try:
+                chunk = os.read(
+                    stream.fileno(), min(8192, _MAC_COMMAND_MAX_BYTES + 1 - len(output))
+                )
+            except (OSError, ValueError):
+                _stop_macos_process(process)
+                return None
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > _MAC_COMMAND_MAX_BYTES:
+                _stop_macos_process(process)
+                return None
+
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            returncode = process.wait(timeout=remaining)
+        except (OSError, subprocess.SubprocessError):
+            _stop_macos_process(process)
+            return None
+        if returncode != 0:
+            return None
+        return bytes(output)
+    except (OSError, ValueError):
+        _stop_macos_process(process)
+        return None
+    finally:
+        selector.close()
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
+def _parse_macos_wifi_interface(text: object) -> str | None:
+    """Return one exact Wi-Fi hardware interface from bounded networksetup output."""
+
+    if not _bounded_utf8_text(text, maximum=_MAC_COMMAND_MAX_BYTES):
+        return None
+    if _contains_controls(text.replace("\n", "")):
+        return None
+    candidates: list[str] = []
+    for block in re.split(r"\n[ \t]*\n", text.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines or lines[0] != "Hardware Port: Wi-Fi":
+            continue
+        devices = [line[len("Device: ") :] for line in lines if line.startswith("Device: ")]
+        if len(devices) != 1 or _MAC_WIFI_INTERFACE.fullmatch(devices[0]) is None:
+            return None
+        candidates.append(devices[0])
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _parse_macos_ipconfig_summary(text: object, *, interface: str) -> dict:
+    """Parse top-level typed fields from ``ipconfig getsummary`` fail-closed."""
+
+    if (
+        not _bounded_utf8_text(text, maximum=_MAC_COMMAND_MAX_BYTES)
+        or type(interface) is not str
+        or _MAC_WIFI_INTERFACE.fullmatch(interface) is None
+    ):
+        return {}
+    assert isinstance(text, str)
+    fields: dict[str, str] = {}
+    allowed = {"BSSID", "InterfaceType", "LinkStatusActive", "SSID", "Security"}
+    for line in text.splitlines():
+        if len(line) > 1024:
+            return {}
+        match = re.fullmatch(r"  ([A-Za-z][A-Za-z0-9]*) : (.*)", line)
+        if match is None or match.group(1) not in allowed:
+            continue
+        key, value = match.groups()
+        if key in fields or value != value.strip() or _contains_controls(value):
+            return {}
+        fields[key] = value
+
+    if fields.get("InterfaceType") != "WiFi" or fields.get("LinkStatusActive") != "TRUE":
+        return {}
+    result: dict = {"connected": True, "interface": interface}
+    if "SSID" in fields and fields["SSID"] != _MAC_PRIVATE_VALUE:
+        ssid = _bounded_text(fields["SSID"], maximum=255)
+        if ssid is None:
+            return {}
+        result["ssid"] = ssid
+    if "BSSID" in fields and fields["BSSID"] != _MAC_PRIVATE_VALUE:
+        bssid = _normalized_bssid(fields["BSSID"])
+        if bssid is None:
+            return {}
+        result["bssid"] = bssid
+    if "Security" in fields:
+        security = fields["Security"]
+        if len(security) > 128 or re.fullmatch(r"[A-Za-z0-9_ /().+-]+", security) is None:
+            return {}
+        result["security"] = security
+    return result
+
+
 def _wifi_summary(data: dict) -> str:
     parts = []
     # SSID/BSSID are rendered or serialized through separately classified fields.
@@ -168,13 +396,10 @@ def _wifi_summary(data: dict) -> str:
 
 def _wifi_mac() -> dict:
     data: dict = {"connected": False}
-    airport = (
-        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-    )
 
-    # wdutil often needs root on newer macOS — try but don't stop if empty
-    if which("wdutil"):
-        text = run_ok(["wdutil", "info"], timeout=10)
+    # wdutil often needs root on newer macOS — try but don't stop if empty.
+    if os.path.isfile(_MAC_WDUTIL):
+        text = _run_macos_command((_MAC_WDUTIL, "info"), timeout=10)
         if re.search(r"^\s*SSID\s*:", text, re.MULTILINE | re.IGNORECASE):
             data["ssid"] = first_match(r"^\s*SSID\s*:\s*(.+)", text)
             data["bssid"] = first_match(r"^\s*BSSID\s*:\s*(\S+)", text)
@@ -188,8 +413,8 @@ def _wifi_mac() -> dict:
                 data["connected"] = True
                 return data
 
-    if __import__("os").path.isfile(airport):
-        text = run_ok([airport, "-I"], timeout=10)
+    if os.path.isfile(_MAC_AIRPORT):
+        text = _run_macos_command((_MAC_AIRPORT, "-I"), timeout=10)
         data["ssid"] = first_match(r"\sSSID:\s*(.+)", text)
         data["bssid"] = first_match(r"\sBSSID:\s*(\S+)", text)
         data["rssi"] = first_match(r"\sagrCtlRSSI:\s*(-?\d+)", text)
@@ -447,6 +672,15 @@ def _bounded_text(value: object, *, maximum: int) -> str | None:
     if not isinstance(value, str) or not value or len(value) > maximum or _contains_controls(value):
         return None
     return value
+
+
+def _bounded_utf8_text(value: object, *, maximum: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return len(value.encode("utf-8", errors="strict")) <= maximum
+    except UnicodeEncodeError:
+        return False
 
 
 def _contains_controls(value: str) -> bool:

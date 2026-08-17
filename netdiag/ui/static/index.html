@@ -4,16 +4,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" content="#13213c">
-    <meta name="description" content="Lantern explains computer and network health with clear, evidence-backed next steps.">
-    <title>Overview · Lantern</title>
+    <meta name="theme-color" content="#12233f">
+    <meta name="description" content="Lantern explains this computer's network health using local, consent-based checks.">
+    <title>Lantern · Local network diagnosis</title>
     <link rel="stylesheet" href="styles.css">
     <script src="app.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">Skip to results</a>
 
-    <div class="app-shell" id="app-shell">
+    <div class="app-shell">
       <header class="topbar">
         <button
           class="icon-button menu-toggle"
@@ -30,23 +30,28 @@
           <span class="brand-mark" aria-hidden="true">
             <svg class="brand-icon"><use href="icons.svg#lantern"></use></svg>
           </span>
-          <span class="brand-name">Lantern</span>
-          <span class="brand-edition">Developer preview</span>
+          <span class="brand-copy">
+            <strong>Lantern</strong>
+            <small>Developer preview</small>
+          </span>
         </button>
 
         <div class="topbar-actions">
-          <span class="scope-badge" title="No report leaves this computer">
+          <span class="local-badge">
             <svg class="icon" aria-hidden="true"><use href="icons.svg#lock"></use></svg>
-            Local only
+            Loopback only
           </span>
-          <button class="quiet-button" id="new-check-button" type="button">
+          <button class="quiet-button" id="new-check-button" type="button" disabled>
             <svg class="icon" aria-hidden="true"><use href="icons.svg#scan"></use></svg>
-            <span>New check</span>
+            New check
+          </button>
+          <button class="quiet-button quiet-button-small" id="end-session-button" type="button" disabled>
+            End local session
           </button>
         </div>
       </header>
 
-      <aside class="sidebar" id="primary-sidebar" aria-label="Lantern navigation">
+      <aside class="sidebar" id="primary-sidebar" aria-label="Lantern navigation" aria-hidden="true" inert>
         <nav class="primary-nav" aria-label="Primary">
           <p class="nav-label">Diagnose</p>
           <button class="nav-item is-current" type="button" data-view-target="overview" aria-current="page">
@@ -59,8 +64,7 @@
           </button>
           <button class="nav-item" type="button" data-view-target="network">
             <svg class="icon" aria-hidden="true"><use href="icons.svg#network"></use></svg>
-            <span>Network</span>
-            <span class="nav-count" aria-label="6 modules">6</span>
+            <span>Network path</span>
           </button>
 
           <div class="nav-subgroup" aria-label="Network modules">
@@ -72,37 +76,39 @@
             <button class="nav-item nav-item-sub" type="button" data-view-target="ports">Ports</button>
           </div>
 
-          <p class="nav-label nav-label-spaced">Act</p>
+          <p class="nav-label nav-label-spaced">Act safely</p>
           <button class="nav-item" type="button" data-view-target="fixes">
             <svg class="icon" aria-hidden="true"><use href="icons.svg#wrench"></use></svg>
             <span>Fixes</span>
-            <span class="status-dot status-attention" title="One suggested fix"><span class="sr-only">One suggested fix</span></span>
-          </button>
-          <button class="nav-item" type="button" data-view-target="share">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#share"></use></svg>
-            <span>Share</span>
-          </button>
-
-          <p class="nav-label nav-label-spaced">Connect &amp; recover</p>
-          <button class="nav-item" type="button" data-view-target="session">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#session"></use></svg>
-            <span>LAN session</span>
+            <span class="nav-note">Unavailable</span>
           </button>
           <button class="nav-item" type="button" data-view-target="rescue">
             <svg class="icon" aria-hidden="true"><use href="icons.svg#rescue"></use></svg>
-            <span>Rescue viability</span>
+            <span>Rescue guidance</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="session">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#session"></use></svg>
+            <span>LAN session</span>
+            <span class="nav-note">Unavailable</span>
+          </button>
+          <button class="nav-item" type="button" data-view-target="share" disabled>
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#share"></use></svg>
+            <span>Share</span>
+            <span class="nav-note">Disabled</span>
           </button>
         </nav>
 
-        <section class="sidebar-foot" aria-labelledby="privacy-title">
-          <div class="privacy-mark" aria-hidden="true">
-            <svg class="icon"><use href="icons.svg#shield"></use></svg>
-          </div>
+        <section class="privacy-note" aria-labelledby="privacy-title">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#shield"></use></svg>
           <div>
-            <h2 id="privacy-title">Private by design</h2>
-            <p>Nothing is uploaded. You choose what to share.</p>
+            <h2 id="privacy-title">Stays on this computer</h2>
+            <p>The interface talks only to Lantern on this device. No report upload is available.</p>
           </div>
         </section>
+        <button class="secondary-button sidebar-session-button" id="mobile-end-session-button" type="button" disabled>
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#lock"></use></svg>
+          End local session
+        </button>
       </aside>
 
       <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Close navigation" tabindex="-1"></button>
@@ -113,33 +119,46 @@
             <div>
               <p class="eyebrow" id="page-eyebrow">Diagnosis</p>
               <h1 id="page-title" tabindex="-1">Overview</h1>
-              <p class="page-description" id="page-description">The clearest picture of this device and its network path.</p>
+              <p class="page-description" id="page-description">A local, evidence-bounded view of this device and its network path.</p>
             </div>
-            <div class="page-actions" id="page-actions"></div>
+            <span class="connection-state" id="connection-state">Connecting locally…</span>
           </header>
 
-          <section class="scan-progress is-hidden" id="scan-progress" aria-labelledby="scan-progress-title">
+          <section class="notice notice-info" id="session-notice" tabindex="-1" aria-live="polite" aria-atomic="true">
+            <svg class="icon" aria-hidden="true"><use href="icons.svg#info"></use></svg>
+            <p id="session-message">Opening a private local session…</p>
+          </section>
+          <p class="sr-only" id="run-announcement" aria-live="polite" aria-atomic="true"></p>
+
+          <section class="run-progress is-hidden" id="run-progress" aria-labelledby="run-progress-title">
             <div class="progress-copy">
               <span class="progress-orbit" aria-hidden="true"></span>
               <div>
-                <h2 id="scan-progress-title">Checking the network path</h2>
-                <p id="scan-progress-detail">Preparing read-only checks…</p>
+                <h2 id="run-progress-title">Checking this device</h2>
+                <p id="run-progress-detail">Waiting for the first diagnostic step…</p>
               </div>
-              <strong id="scan-progress-value">0%</strong>
+              <strong id="run-progress-value">0%</strong>
             </div>
-            <div class="progress-track" role="progressbar" aria-label="Diagnostic progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-              <span id="scan-progress-bar"></span>
+            <div
+              class="progress-track"
+              id="progress-track"
+              role="progressbar"
+              aria-label="Diagnostic progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <span id="run-progress-bar"></span>
             </div>
+            <button class="secondary-button" id="cancel-button" type="button">Cancel check</button>
           </section>
 
           <div id="page-content" aria-live="off">
             <section class="panel loading-shell" aria-labelledby="loading-title">
-              <div class="skeleton skeleton-icon" aria-hidden="true"></div>
-              <div class="loading-copy">
-                <h2 id="loading-title">Preparing your overview</h2>
-                <p>Lantern is loading its offline interface.</p>
-                <div class="skeleton skeleton-line" aria-hidden="true"></div>
-                <div class="skeleton skeleton-line skeleton-line-short" aria-hidden="true"></div>
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div>
+                <h2 id="loading-title">Connecting to Lantern</h2>
+                <p>The local interface is waiting for an authenticated status snapshot.</p>
               </div>
             </section>
           </div>
@@ -155,163 +174,15 @@
           <svg class="icon" aria-hidden="true"><use href="icons.svg#network"></use></svg>
           <span>Network</span>
         </button>
-        <button class="mobile-nav-item" type="button" data-view-target="fixes">
-          <svg class="icon" aria-hidden="true"><use href="icons.svg#wrench"></use></svg>
-          <span>Fixes</span>
-        </button>
         <button class="mobile-nav-item" type="button" data-view-target="rescue">
           <svg class="icon" aria-hidden="true"><use href="icons.svg#rescue"></use></svg>
           <span>Rescue</span>
         </button>
-        <button class="mobile-nav-item" type="button" data-view-target="share">
-          <svg class="icon" aria-hidden="true"><use href="icons.svg#share"></use></svg>
-          <span>Share</span>
+        <button class="mobile-nav-item" type="button" data-view-target="fixes">
+          <svg class="icon" aria-hidden="true"><use href="icons.svg#wrench"></use></svg>
+          <span>Fixes</span>
         </button>
       </nav>
     </div>
-
-    <dialog class="dialog onboarding-dialog" id="onboarding-dialog" aria-labelledby="onboarding-title" aria-describedby="onboarding-description">
-      <form method="dialog" id="onboarding-form">
-        <div class="dialog-hero">
-          <span class="dialog-mark" aria-hidden="true">
-            <svg class="brand-icon"><use href="icons.svg#lantern"></use></svg>
-          </span>
-          <p class="eyebrow">Welcome to Lantern</p>
-          <h2 id="onboarding-title">Let's find what is getting in the way.</h2>
-          <p id="onboarding-description">Lantern checks this computer and its network, explains what it finds, and suggests the safest next step.</p>
-        </div>
-
-        <div class="promise-grid" aria-label="Lantern privacy promises">
-          <div class="promise-item">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#eye"></use></svg>
-            <strong>Read-only first</strong>
-            <span>No settings change during this check.</span>
-          </div>
-          <div class="promise-item">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#lock"></use></svg>
-            <strong>Stays here</strong>
-            <span>No report is uploaded.</span>
-          </div>
-          <div class="promise-item">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#hand"></use></svg>
-            <strong>You stay in control</strong>
-            <span>Every active test or fix asks first.</span>
-          </div>
-        </div>
-
-        <fieldset class="choice-fieldset">
-          <legend>What would you like help with?</legend>
-          <label class="choice-card">
-            <input type="radio" name="goal" value="problem" checked>
-            <span class="choice-control" aria-hidden="true"></span>
-            <span>
-              <strong>Something is not working</strong>
-              <small>Check the device and trace its network path.</small>
-            </span>
-          </label>
-          <label class="choice-card">
-            <input type="radio" name="goal" value="network">
-            <span class="choice-control" aria-hidden="true"></span>
-            <span>
-              <strong>Check this network</strong>
-              <small>Focus on Wi-Fi, gateway, internet, DNS, and nearby services.</small>
-            </span>
-          </label>
-          <label class="choice-card">
-            <input type="radio" name="goal" value="rescue">
-            <span class="choice-control" aria-hidden="true"></span>
-            <span>
-              <strong>Prepare for recovery</strong>
-              <small>Assess viability without making repair changes.</small>
-            </span>
-          </label>
-        </fieldset>
-
-        <label class="consent-row">
-          <input type="checkbox" id="active-discovery" name="active-discovery">
-          <span>
-            <strong>Include active device discovery</strong>
-            <small>Sends a small number of local-network probes to 192.168.0.0/24. Off by default.</small>
-          </span>
-        </label>
-
-        <div class="dialog-actions">
-          <button class="primary-button primary-button-wide" type="submit" value="start">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#scan"></use></svg>
-            Start read-only check
-          </button>
-          <p>Usually takes about 20 seconds. You can stop safely.</p>
-        </div>
-      </form>
-    </dialog>
-
-    <dialog class="dialog fix-dialog" id="fix-dialog" aria-labelledby="fix-dialog-title" aria-describedby="fix-dialog-description">
-      <form method="dialog" id="fix-form">
-        <header class="dialog-header">
-          <div>
-            <p class="eyebrow">Preview · demonstration only</p>
-            <h2 id="fix-dialog-title">Refresh the local DNS cache</h2>
-            <p id="fix-dialog-description">This preview is not connected to the computer. No settings or services will change.</p>
-          </div>
-          <button class="icon-button" type="submit" value="close" aria-label="Close fix preview">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#close"></use></svg>
-          </button>
-        </header>
-
-        <div class="lifecycle" id="fix-lifecycle" aria-label="Fix lifecycle">
-          <div class="lifecycle-step is-active" data-fix-step="preview"><span>1</span>Preview</div>
-          <div class="lifecycle-step" data-fix-step="apply"><span>2</span>Apply</div>
-          <div class="lifecycle-step" data-fix-step="verify"><span>3</span>Verify</div>
-          <div class="lifecycle-step" data-fix-step="rollback"><span>4</span>Rollback</div>
-        </div>
-
-        <div class="fix-preview-body" id="fix-preview-body">
-          <section class="impact-card impact-low" aria-labelledby="risk-title">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#shield-check"></use></svg>
-            <div>
-              <h3 id="risk-title">Low risk and reversible</h3>
-              <p>Clears cached name lookups. It does not change your DNS server or network settings.</p>
-            </div>
-          </section>
-
-          <dl class="detail-list">
-            <div><dt>Why</dt><dd>A stale local answer may explain the one inconsistent lookup.</dd></div>
-            <div><dt>Access</dt><dd>Local administrator approval may be requested by the operating system.</dd></div>
-            <div><dt>Interruption</dt><dd>New website lookups may pause for a few seconds.</dd></div>
-            <div><dt>Verification</dt><dd>Repeat the same DNS checks and compare fresh answers.</dd></div>
-            <div><dt>Rollback</dt><dd>No stored setting changes; the cache rebuilds automatically.</dd></div>
-          </dl>
-        </div>
-
-        <div class="fix-result is-hidden" id="fix-result" role="status">
-          <span class="result-mark" aria-hidden="true">
-            <svg class="icon"><use href="icons.svg#check"></use></svg>
-          </span>
-          <h3 id="fix-result-title">Simulation verified</h3>
-          <p id="fix-result-description">The demonstration completed without touching this computer. A real action will show before-and-after evidence here.</p>
-        </div>
-
-        <footer class="dialog-footer">
-          <p class="demo-notice">
-            <svg class="icon" aria-hidden="true"><use href="icons.svg#info"></use></svg>
-            Interface demonstration—no command or fix is connected.
-          </p>
-          <div class="button-row">
-            <button class="secondary-button" type="submit" value="cancel">Cancel</button>
-            <button class="primary-button" type="button" id="simulate-fix-button">Simulate fix lifecycle</button>
-          </div>
-        </footer>
-      </form>
-    </dialog>
-
-    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <div class="sr-only" id="route-announcer" aria-live="polite" aria-atomic="true"></div>
-
-    <noscript>
-      <section class="noscript-message">
-        <h1>Lantern needs JavaScript for its local interface.</h1>
-        <p>The diagnostic engine remains local. Enable JavaScript for this loopback-only application, or use the <code>netdiag</code> command-line interface.</p>
-      </section>
-    </noscript>
   </body>
 </html>

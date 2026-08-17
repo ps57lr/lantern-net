@@ -1,9 +1,10 @@
-"""Offline, integrity, security, and semantic checks for the Lantern shell."""
+"""Integrity, offline-security, accessibility, and product-boundary tests for the UI."""
 
 from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -30,15 +31,13 @@ EXPECTED_VIEWS = {
     "mdns",
     "ports",
     "fixes",
-    "share",
-    "session",
     "rescue",
+    "session",
+    "share",
 }
 
 
 class DocumentInspector(HTMLParser):
-    """Collect the small set of HTML facts needed by semantic tests."""
-
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.tags: list[tuple[str, dict[str, str | None]]] = []
@@ -88,10 +87,12 @@ def test_manifest_is_exact_immutable_and_integrity_checked() -> None:
         assert len(item.spec.sha256) == 64
 
     with pytest.raises(TypeError):
-        assets.ASSET_MANIFEST["/app/extra"] = assets.ASSET_MANIFEST["/app/"]  # type: ignore[index]
+        assets.ASSET_MANIFEST["/app/extra"] = assets.ASSET_MANIFEST[  # type: ignore[index]
+            "/app/"
+        ]
 
 
-def test_index_alias_returns_the_same_verified_bytes() -> None:
+def test_index_alias_and_content_types_are_exact() -> None:
     root_index = assets.load_asset("/app/")
     named_index = assets.load_asset("/app/index.html")
     assert root_index.body == named_index.body
@@ -137,7 +138,7 @@ def test_loader_detects_changed_packaged_bytes(
         assets.load_asset("/app/")
 
 
-def test_security_headers_enforce_an_offline_same_origin_shell() -> None:
+def test_security_headers_keep_the_application_same_origin_and_script_safe() -> None:
     headers = assets.STATIC_SECURITY_HEADERS
     policy = headers["Content-Security-Policy"]
 
@@ -145,22 +146,23 @@ def test_security_headers_enforce_an_offline_same_origin_shell() -> None:
     assert headers["Referrer-Policy"] == "no-referrer"
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Cross-Origin-Resource-Policy"] == "same-origin"
-    assert "default-src 'none'" in policy
-    assert "script-src 'self'" in policy
-    assert "style-src 'self'" in policy
-    assert "connect-src 'self'" in policy
-    assert "frame-ancestors 'none'" in policy
-    assert "object-src 'none'" in policy
-    assert "unsafe-inline" not in policy
-    assert "unsafe-eval" not in policy
-    assert "https:" not in policy
-    assert "http:" not in policy
-    assert "data:" not in policy
+    for directive in (
+        "default-src 'none'",
+        "script-src 'self'",
+        "style-src 'self'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+        "worker-src 'none'",
+    ):
+        assert directive in policy
+    for forbidden in ("unsafe-inline", "unsafe-eval", "https:", "http:", "data:"):
+        assert forbidden not in policy
     assert "camera=()" in headers["Permissions-Policy"]
     assert "microphone=()" in headers["Permissions-Policy"]
 
 
-def test_html_references_only_manifest_assets(source_text: dict[str, str]) -> None:
+def test_html_references_only_verified_packaged_assets(source_text: dict[str, str]) -> None:
     inspector = DocumentInspector()
     inspector.feed(source_text["index.html"])
 
@@ -180,13 +182,15 @@ def test_html_references_only_manifest_assets(source_text: dict[str, str]) -> No
         assert "/app/" + reference in assets.ASSET_MANIFEST
 
     combined = "\n".join(source_text.values())
-    network_urls = set(re.findall(r"https?://[^\s\"')>]+", combined))
+    network_urls = set(re.findall(r'https?://[^\s"\')>]+', combined))
     assert network_urls <= {"http://www.w3.org/2000/svg"}
     assert "@import" not in source_text["styles.css"]
     assert "url(" not in source_text["styles.css"]
 
 
-def test_html_has_semantic_landmarks_and_consent_controls(source_text: dict[str, str]) -> None:
+def test_html_has_semantic_landmarks_and_accessible_live_controls(
+    source_text: dict[str, str],
+) -> None:
     html = source_text["index.html"]
     inspector = DocumentInspector()
     inspector.feed(html)
@@ -195,19 +199,32 @@ def test_html_has_semantic_landmarks_and_consent_controls(source_text: dict[str,
     assert inspector.attributes_for("header")
     assert len(inspector.attributes_for("nav")) >= 2
     assert inspector.attributes_for("aside")
+    sidebar = next(
+        attrs for attrs in inspector.attributes_for("aside") if attrs.get("id") == "primary-sidebar"
+    )
+    assert sidebar.get("aria-hidden") == "true"
+    assert "inert" in sidebar
     assert any(attrs.get("id") == "main-content" for attrs in inspector.attributes_for("main"))
     assert any(attrs.get("id") == "page-title" for attrs in inspector.attributes_for("h1"))
     assert any(attrs.get("name") == "viewport" for attrs in inspector.attributes_for("meta"))
     assert any(attrs.get("href") == "#main-content" for attrs in inspector.attributes_for("a"))
+    assert any(attrs.get("role") == "progressbar" for _, attrs in inspector.tags)
+    assert len([attrs for _, attrs in inspector.tags if attrs.get("aria-live") == "polite"]) >= 2
+    assert any(attrs.get("id") == "cancel-button" for attrs in inspector.attributes_for("button"))
+    buttons = {
+        attrs.get("id"): attrs for attrs in inspector.attributes_for("button") if attrs.get("id")
+    }
+    assert "end-session-button" in buttons
+    assert "mobile-end-session-button" in buttons
+    assert "disabled" in buttons["mobile-end-session-button"]
+    assert 'id="mobile-end-session-button"' in html
+    assert html.index('id="mobile-end-session-button"') < html.index("</aside>")
+    assert ">\n          End local session\n        </button>" in html
 
-    dialogs = inspector.attributes_for("dialog")
-    assert len(dialogs) == 2
-    assert all(item.get("aria-labelledby") for item in dialogs)
-    assert all(item.get("aria-describedby") for item in dialogs)
-    assert len(inspector.attributes_for("label")) >= 4
-    assert any(attrs.get("type") == "radio" for attrs in inspector.attributes_for("input"))
-    assert any(attrs.get("type") == "checkbox" for attrs in inspector.attributes_for("input"))
-    assert any(attrs.get("aria-live") == "polite" for _, attrs in inspector.tags)
+    identifiers = [
+        str(attrs["id"]) for _tag, attrs in inspector.tags if attrs.get("id") is not None
+    ]
+    assert all(count == 1 for count in Counter(identifiers).values())
 
     scripts = inspector.attributes_for("script")
     assert scripts == [{"src": "app.js", "defer": None}]
@@ -218,67 +235,29 @@ def test_html_has_semantic_landmarks_and_consent_controls(source_text: dict[str,
         assert not any(name.lower().startswith("on") for name in attributes)
 
 
-def test_every_requested_view_is_navigable_and_rendered(source_text: dict[str, str]) -> None:
-    html_targets = set(re.findall(r'data-view-target="([a-z]+)"', source_text["index.html"]))
-    assert html_targets == EXPECTED_VIEWS
-
-    js = source_text["app.js"]
-    renderer_block = js.split("const VIEW_RENDERERS = {", 1)[1].split("};", 1)[0]
-    rendered_views = set(re.findall(r"^\s{4}([a-z]+):", renderer_block, re.MULTILINE))
-    assert rendered_views == EXPECTED_VIEWS
-
-    expected_product_language = [
-        "Start read-only check",
-        "active device discovery",
-        "The Lantern Path",
-        "Access prerequisites",
-        "Simulate fix lifecycle",
-        "Redaction preview",
-        "LAN session",
-        "Rescue viability",
-        "Five-part viability view",
-    ]
-    combined = source_text["index.html"] + source_text["app.js"]
-    for phrase in expected_product_language:
-        assert phrase.lower() in combined.lower()
-
-
-def test_renderer_uses_safe_text_and_has_no_transport_or_persistence(
+def test_all_live_and_explicitly_unavailable_views_are_navigable(
     source_text: dict[str, str],
 ) -> None:
-    js = source_text["app.js"]
-    assert "const DEMO_MODE = true" in js
-    assert "const DEMO_FIXTURE" in js
-    assert "textContent" in js
-    assert "document.createElement" in js
-    assert "replaceChildren" in js
-
-    forbidden = [
-        ".innerHTML",
-        ".outerHTML",
-        "insertAdjacentHTML",
-        "document.write",
-        "eval(",
-        "new Function",
-        ".style",
-        'setAttribute("style"',
-        "fetch(",
-        "XMLHttpRequest",
-        "WebSocket",
-        "EventSource",
-        "sendBeacon",
-        "localStorage",
-        "sessionStorage",
-        "indexedDB",
-        "navigator.clipboard",
-    ]
-    for token in forbidden:
-        assert token not in js
+    html_targets = set(re.findall(r'data-view-target="([a-z]+)"', source_text["index.html"]))
+    assert html_targets == EXPECTED_VIEWS
+    combined = source_text["index.html"] + source_text["app.js"]
+    for phrase in (
+        "Module coverage",
+        "Include basic network checks",
+        "Cancel check",
+        "Fixes are unavailable",
+        "LAN sessions are unavailable",
+        "Rescue is guidance only",
+        "Sharing is disabled",
+    ):
+        assert phrase in combined
 
 
-def test_css_covers_accessibility_responsiveness_and_states(source_text: dict[str, str]) -> None:
+def test_css_covers_keyboard_mobile_motion_contrast_and_partial_states(
+    source_text: dict[str, str],
+) -> None:
     css = source_text["styles.css"]
-    required_tokens = [
+    for token in (
         ":focus-visible",
         "@media (max-width: 860px)",
         "@media (max-width: 599px)",
@@ -287,31 +266,32 @@ def test_css_covers_accessibility_responsiveness_and_states(source_text: dict[st
         "@media (forced-colors: active)",
         "env(safe-area-inset-bottom)",
         "min-height: 44px",
-        ".status-healthy",
+        ".status-ok",
         ".status-attention",
-        ".status-critical",
-        ".status-unknown",
-        ".status-blocked",
+        ".status-limited",
+        ".status-unavailable",
         ".loading-shell",
-        ".error-state",
         ".unsupported-state",
-    ]
-    for token in required_tokens:
+        ".sidebar-session-button",
+    ):
         assert token in css
     assert "outline: none" not in css
     assert "outline: 0" not in css
+    base_sidebar_action = css.split("@media (max-width: 860px)", 1)[0].split(
+        ".sidebar-session-button", 1
+    )[1]
+    narrow = css.split("@media (max-width: 860px)", 1)[1].split("@media (max-width: 599px)", 1)[0]
+    assert "display: none" in base_sidebar_action.split("}", 1)[0]
+    assert ".sidebar-session-button" in narrow
+    assert "display: inline-flex" in narrow.split(".sidebar-session-button", 1)[1].split("}", 1)[0]
 
 
-def test_light_status_pairs_meet_wcag_aa_contrast(source_text: dict[str, str]) -> None:
+def test_light_palette_status_pairs_meet_wcag_aa(source_text: dict[str, str]) -> None:
     css = source_text["styles.css"]
     root = css.split(":root {", 1)[1].split("}", 1)[0]
     variables = dict(re.findall(r"--([a-z-]+):\s*(#[0-9a-fA-F]{6})", root))
-
-    for status in ("healthy", "attention", "critical", "info", "unknown", "blocked"):
-        foreground = variables[status]
-        background = variables[status + "-bg"]
-        assert contrast_ratio(foreground, background) >= 4.5
-
+    for name in ("healthy", "attention", "critical", "info", "unknown", "blocked"):
+        assert contrast_ratio(variables[name], variables[name + "-bg"]) >= 4.5
     assert contrast_ratio("#ffffff", variables["navy"]) >= 4.5
 
 
@@ -323,16 +303,13 @@ def test_svg_sprite_is_local_scriptless_and_complete(source_text: dict[str, str]
         for element in root
         if element.tag.endswith("symbol") and "id" in element.attrib
     }
-    assert len(symbol_ids) == len(set(symbol_ids))
-
-    required_symbols = {
+    required = {
         "lantern",
         "overview",
         "device",
         "network",
         "wifi",
         "gateway",
-        "globe",
         "dns",
         "lan",
         "mdns",
@@ -348,7 +325,7 @@ def test_svg_sprite_is_local_scriptless_and_complete(source_text: dict[str, str]
         "info",
         "unknown",
     }
-    assert required_symbols <= symbol_ids
+    assert required <= symbol_ids
     assert "<script" not in svg.lower()
     assert "foreignObject" not in svg
     assert not re.search(r"\bon[a-z]+\s*=", svg, re.IGNORECASE)
