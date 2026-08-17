@@ -14,7 +14,7 @@ from netdiag.checks.ports import scan_ports
 from netdiag.checks.routing import check_routing
 from netdiag.checks.wifi import check_wifi
 from netdiag.findings import Finding, exit_code, worst_severity
-from netdiag.platform import detect_os, which
+from netdiag.platform import detect_os, maybe_reexec_macos_system_python, which
 from netdiag.report import print_report
 from netdiag.scanner import report_exit_code, run_full_scan
 
@@ -222,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    maybe_reexec_macos_system_python(argv)
     parser = build_parser()
     args = parser.parse_args(argv)
     if not args.command:

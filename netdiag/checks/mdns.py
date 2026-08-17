@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 
+from netdiag.checks.mdns_normalize import dedupe_mdns_records
 from netdiag.findings import Finding, Severity
 from netdiag.platform import OSInfo, which
 
@@ -75,16 +76,17 @@ def browse_mdns(osinfo: OSInfo, timeout: float = 5.0) -> tuple[list[Finding], di
                 "Install avahi-utils on Linux; dns-sd is built into macOS.",
             )
         )
-        return findings, {"services": services}
+        return findings, {"services": [], "raw_count": 0, "unique_count": 0}
 
-    if services:
-        types = sorted({s["type"] for s in services})[:15]
+    unique_services = dedupe_mdns_records(services)
+    if unique_services:
+        types = sorted({service["type"] for service in unique_services})[:15]
         findings.append(
             Finding(
                 Severity.INFO,
                 "mdns",
-                f"Found {len(services)} mDNS service advertisement(s)",
-                ", ".join(types) + ("…" if len(services) > 15 else ""),
+                f"Found {len(unique_services)} unique mDNS service advertisement(s)",
+                ", ".join(types) + ("…" if len(unique_services) > 15 else ""),
             )
         )
     else:
@@ -97,4 +99,8 @@ def browse_mdns(osinfo: OSInfo, timeout: float = 5.0) -> tuple[list[Finding], di
             )
         )
 
-    return findings, {"services": services}
+    return findings, {
+        "services": unique_services,
+        "raw_count": len(services),
+        "unique_count": len(unique_services),
+    }

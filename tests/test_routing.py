@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from netdiag.checks.routing import RouteInfo, check_routing, get_routes, local_ipv4_networks
+from netdiag.checks.routing import RouteInfo, check_routing, get_routes, local_ipv4_networks, primary_lan_network
 from netdiag.findings import Severity
 from netdiag.platform import OSInfo
 
@@ -28,6 +28,18 @@ def test_linux_preserves_real_prefix():
     addresses = "2: eth0: <BROADCAST,MULTICAST,UP>\n    inet 10.20.4.9/20 brd 10.20.15.255\n"
     with patch("netdiag.checks.routing.run_ok", side_effect=[routes, addresses]):
         assert [str(n) for n in local_ipv4_networks(LINUX)] == ["10.20.0.0/20"]
+
+
+def test_primary_lan_network_uses_default_interface():
+    routes = "default via 192.168.0.1 dev eth0\n"
+    addresses = (
+        "2: eth0: <BROADCAST,MULTICAST,UP>\n    inet 192.168.0.183/24 brd 192.168.0.255\n"
+        "3: docker0: <BROADCAST,MULTICAST,UP>\n    inet 172.17.0.1/16 brd 172.17.255.255\n"
+    )
+    with patch("netdiag.checks.routing.run_ok", side_effect=[routes, addresses]):
+        from netdiag.checks.routing import primary_lan_network
+
+        assert str(primary_lan_network(LINUX)) == "192.168.0.0/24"
 
 
 def test_blocked_gateway_ping_is_not_an_outage_when_tcp_works():

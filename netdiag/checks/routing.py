@@ -91,18 +91,45 @@ def get_routes(osinfo: OSInfo) -> RouteInfo:
     return RouteInfo(gateway, iface, interfaces)
 
 
-def local_ipv4_networks(osinfo: OSInfo) -> list[ipaddress.IPv4Network]:
-    nets: list[ipaddress.IPv4Network] = []
+def is_virtual_bridge_interface(name: str) -> bool:
+    lower = name.lower()
+    return lower == "docker0" or lower.startswith("br-") or lower.startswith("virbr")
+
+
+def _private_ipv4_network(network: str) -> ipaddress.IPv4Network | None:
+    try:
+        net = ipaddress.ip_network(network, strict=False)
+    except ValueError:
+        return None
+    if net.is_private and not net.is_loopback and not net.is_link_local:
+        return net
+    return None
+
+
+def primary_lan_network(osinfo: OSInfo) -> ipaddress.IPv4Network | None:
+    """Return the IPv4 network for the default route interface."""
     routes = get_routes(osinfo)
-    for iface in routes.interfaces:
-        for network in iface.networks or []:
-            try:
-                net = ipaddress.ip_network(network, strict=False)
-                if net.is_private and not net.is_loopback and not net.is_link_local:
-                    nets.append(net)
-            except ValueError:
+    if routes.default_iface:
+        for iface in routes.interfaces:
+            if iface.name != routes.default_iface:
                 continue
-    return list(dict.fromkeys(nets))
+            for network in iface.networks or []:
+                net = _private_ipv4_network(network)
+                if net is not None:
+                    return net
+    for iface in routes.interfaces:
+        if is_virtual_bridge_interface(iface.name):
+            continue
+        for network in iface.networks or []:
+            net = _private_ipv4_network(network)
+            if net is not None:
+                return net
+    return None
+
+
+def local_ipv4_networks(osinfo: OSInfo) -> list[ipaddress.IPv4Network]:
+    primary = primary_lan_network(osinfo)
+    return [primary] if primary is not None else []
 
 
 def check_routing(osinfo: OSInfo) -> tuple[list[Finding], dict]:

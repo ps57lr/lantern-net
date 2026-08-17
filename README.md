@@ -39,7 +39,7 @@ netdiag run --json --redact > netdiag-report.json
 | `netdiag dns [DOMAIN]` | Resolver answers, blocking, failures, and response time |
 | `netdiag wifi` | Association, signal, band, channel, rate, and security |
 | `netdiag route` | Interfaces, default gateway, ICMP, and outbound HTTPS path |
-| `netdiag lan` | Passive ARP/neighbor discovery |
+| `netdiag lan` | Passive ARP/neighbor discovery scoped to the default interface/LAN |
 | `netdiag lan --ping` | Active ping discovery, limited to 256 hosts by default |
 | `netdiag ports HOST` | Bounded TCP check of common management/service ports |
 | `netdiag mdns` | Bounded Bonjour/Avahi service-type discovery |
@@ -73,7 +73,7 @@ Exit codes are `0` for healthy/informational, `1` for warnings, and `2` for crit
 
 ## JSON contract
 
-Full reports include `schema_version`, `tool_version`, UTC start time, duration, overall severity, structured findings, and raw per-check evidence. Each probe also records its duration; DNS and TCP probes include response times. Optional probe failures are contained and represented as findings rather than aborting the report.
+Full reports include `schema_version`, `tool_version`, UTC start time, duration, overall severity, structured findings, and raw per-check evidence. Each probe also records its duration; DNS and TCP probes include response times. LAN output includes `default_interface`, scoped `network`, `arp_source`, `arp_status`, and optional `arp_detail`. mDNS output reports normalized, deduplicated `services` plus `raw_count` and `unique_count`. Optional probe failures are contained and represented as findings rather than aborting the report.
 
 The `1.x` schema will remain backward compatible. New fields may be added; consumers should ignore fields they do not recognize.
 
@@ -89,7 +89,7 @@ No report is uploaded by `netdiag`. Internet-path, DNS, and port probes necessar
 
 `netdiag` uses native tools when available:
 
-- macOS: `route`, `ifconfig`, `scutil`, `networksetup`, `wdutil`/`airport`, `arp`, `dns-sd`, `ping`, and `dig`.
+- macOS: `route`, `ifconfig`, `scutil`, `networksetup`, `wdutil`/`airport`, PF_ROUTE sysctl for ARP (re-execs via `/usr/bin/python3` when needed), `dns-sd`, `ping`, and `dig`.
 - Linux: `ip`, `resolvectl`, NetworkManager's `nmcli`, `iwgetid`, `avahi-browse`, `ping`, and `dig`.
 
 Specific-resolver DNS comparison requires `dig`. Without it, system DNS still works through Python's resolver, and `netdiag` explicitly reports that it cannot query a chosen resolver—it never silently substitutes another server.
