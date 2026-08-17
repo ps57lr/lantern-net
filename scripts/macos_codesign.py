@@ -441,7 +441,7 @@ def _extract_certificate_hashes(path: Path) -> tuple[str, str]:
     with tempfile.TemporaryDirectory(prefix="lantern-codesign-cert-") as temporary:
         prefix = Path(temporary) / "certificate"
         _run_text(
-            [str(_CODESIGN), "-d", "--extract-certificates", str(prefix), str(path)],
+            [str(_CODESIGN), "-d", f"--extract-certificates={prefix}", str(path)],
             timeout=30,
         )
         leaf = Path(f"{prefix}0")
@@ -473,7 +473,14 @@ def _verify_one_signature(
     if signature["team_identifier"] != certificate.team_id:
         raise PackageVerificationError(f"Developer ID team does not match: {path.name}")
     details = signature["details"]
-    runtime = re.search(r"(?m)^flags=.*\bruntime\b", details) is not None
+    runtime = (
+        re.search(
+            r"(?m)^(?:CodeDirectory[^\r\n]*\s)?flags=0x[0-9A-Fa-f]+"
+            r"\([^\r\n)]*\bruntime\b[^\r\n)]*\)",
+            details,
+        )
+        is not None
+    )
     if not runtime:
         raise PackageVerificationError(f"Hardened Runtime is missing: {path.name}")
     timestamp = re.search(r"(?m)^Timestamp=(.+)$", details)
