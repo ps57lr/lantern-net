@@ -2,7 +2,7 @@
 
 Status: implemented local development foundation plus explicitly future designs
 
-Current local checkpoint: `netdiag` `0.3.0.dev4`; original baseline: v0.2.1 (`0871248`)
+Current local checkpoint: `netdiag` `0.3.0.dev5`; original baseline: v0.2.1 (`0871248`)
 
 Applies to: local UI, portable builds, LAN responder, and rescue workflows
 
@@ -436,7 +436,7 @@ view from the run ID stored in an HttpOnly session, not from browser-local evide
   when added, belongs in a minimal separately reviewed helper with action-specific
   messages.
 
-Current local endpoints in `0.3.0.dev4`:
+Current local endpoints in `0.3.0.dev5`:
 
 ```text
 GET  /app/                    static app shell and allowlisted assets
@@ -486,7 +486,7 @@ dependency, not a core runtime dependency.
 
 Build on the target OS; do not claim cross-compiled equivalence:
 
-- macOS: the dev4 candidate supports arm64 only, built with the exact pinned arm64
+- macOS: the current candidate supports arm64 only, built with the exact pinned arm64
   runtime. A future x86_64 or universal2 build requires its own pinned runtime,
   native test host, signing inventory, and minimum-OS proof. A development build is
   explicitly unsigned until Developer ID signing and notarization are completed.
@@ -512,10 +512,11 @@ family-grade release requires signed artifacts, macOS notarization, protected bu
 provenance, and verified updates. The app never adds persistence, installs a service,
 or changes host configuration merely because it runs from removable media.
 
-The dev4 source line adds signing-aware packaging foundations only. It is not a
-family handoff until a clean Developer ID signed artifact is accepted by Apple,
-stapled, independently verified, and opened successfully on a clean supported Mac.
-Passing those gates makes it a limited family beta, not a production release.
+The immutable dev4 family beta passed signing, notarization, stapling, independent
+verification, and local launch gates, but its local page can open in Safari behind
+other windows. Dev5 corrects that foreground-launch behavior and is not a family
+handoff until a fresh artifact passes every release and clean-machine gate. Passing
+those gates makes it a limited family beta, not a production release.
 
 ### Build inputs and outputs
 

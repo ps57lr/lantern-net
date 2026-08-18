@@ -2,7 +2,7 @@
 
 Status: living threat model; original Phase 0 review plus current local checkpoint
 Review date: 2026-08-17
-Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev4`
+Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev5`
 Applies to: Lantern Core, Portable, local UI, LAN responder, and Rescue
 
 ## Executive decision
@@ -44,10 +44,12 @@ structural redaction, a reviewed local-file preview, and dry-run/read-only safet
 foundations. It does not add a LAN listener, credentials, real remediation, rescue
 writes, automatic execution, an updater, or a production trust claim.
 
-Dev4 adds signing-aware packaging work, not a completed trust claim. Family
-distribution remains blocked until a clean Developer ID signed, Apple-notarized,
-stapled artifact passes independent Gatekeeper and clean-machine opening tests. A
-passing artifact would remain a limited family beta rather than production software.
+The immutable dev4 family beta passed clean-build, Developer ID signing, Apple
+notarization, stapling, independent verification, and local opening gates, but it
+exposed a Safari foreground usability defect. Dev5 corrects that launch behavior
+and must independently repeat the full clean-build, signing, notarization, stapling,
+verification, Gatekeeper, and Finder-opening gates before handoff. Either artifact
+remains a limited family beta rather than production software.
 
 ### Original baseline (historical)
 
