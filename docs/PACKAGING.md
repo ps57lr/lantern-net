@@ -98,12 +98,12 @@ and prompting disabled; packaging fails closed if that reviewed path is unavaila
 
 ## Produced files
 
-For version `0.3.0.dev4` on Apple Silicon, the names are:
+For version `0.3.0.dev5` on Apple Silicon, the names are:
 
 ```text
-lantern-family-beta-0.3.0.dev4-macos-arm64-UNSIGNED-DEV/
-lantern-family-beta-0.3.0.dev4-macos-arm64-UNSIGNED-DEV.zip
-lantern-family-beta-0.3.0.dev4-macos-arm64-UNSIGNED-DEV.zip.sha256
+lantern-family-beta-0.3.0.dev5-macos-arm64-UNSIGNED-DEV/
+lantern-family-beta-0.3.0.dev5-macos-arm64-UNSIGNED-DEV.zip
+lantern-family-beta-0.3.0.dev5-macos-arm64-UNSIGNED-DEV.zip.sha256
 ```
 
 The unpacked directory contains:
@@ -115,8 +115,8 @@ The unpacked directory contains:
 - the one-folder application payload and an offline verification executable.
 
 PEP 440 development versions are kept in the runtime and package manifest. macOS bundle
-metadata uses Apple's numeric forms: `0.3.0.dev4` maps to marketing version `0.3.0` and
-bundle build `4`.
+metadata uses Apple's numeric forms: `0.3.0.dev5` maps to marketing version `0.3.0` and
+bundle build `5`.
 
 ## Verification
 
@@ -125,7 +125,7 @@ Verify an unpacked artifact on its target operating system:
 ```bash
 python3 scripts/verify_family_beta.py \
   --require-clean-source \
-  dist/family-beta/lantern-family-beta-0.3.0.dev4-macos-arm64-UNSIGNED-DEV
+  dist/family-beta/lantern-family-beta-0.3.0.dev5-macos-arm64-UNSIGNED-DEV
 ```
 
 The verifier is stdlib-only and checks:
@@ -200,9 +200,9 @@ artifacts are not accepted as signing input, and there is no dirty-release overr
 This creates:
 
 ```text
-lantern-family-beta-0.3.0.dev4-macos-arm64-SIGNED/
-lantern-family-beta-0.3.0.dev4-macos-arm64-SIGNED.zip
-lantern-family-beta-0.3.0.dev4-macos-arm64-SIGNED.zip.sha256
+lantern-family-beta-0.3.0.dev5-macos-arm64-SIGNED/
+lantern-family-beta-0.3.0.dev5-macos-arm64-SIGNED.zip
+lantern-family-beta-0.3.0.dev5-macos-arm64-SIGNED.zip.sha256
 ```
 
 Before any signing operation, the release tool fully verifies and snapshots every freshly

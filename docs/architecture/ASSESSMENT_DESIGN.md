@@ -1,10 +1,11 @@
 # Offline authorized-assessment foundation
 
-Status: **DISABLED / DESIGN ONLY** in `0.3.0.dev4`.
+Status: **DISABLED / DESIGN ONLY** in `0.3.0.dev5`.
 
-The dev4 signing-aware packaging work does not enable this assessment lane. A
-notarized family-beta artifact would still provide only the local, disabled design
-foundation described here—not organization-wide scanning or assurance.
+The dev5 browser-foreground correction and earlier signing-aware packaging work do
+not enable this assessment lane. A notarized family-beta artifact still provides
+only the local, disabled design foundation described here—not organization-wide
+scanning or assurance.
 
 This package is a safety boundary for planning a possible future authorized
 network assessment. It does not scan, listen, connect, resolve names, launch a
