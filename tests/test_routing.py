@@ -1,12 +1,61 @@
+import subprocess
+import unicodedata
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from netdiag.checks.routing import RouteInfo, check_routing, get_routes, local_ipv4_networks
+from netdiag.checks.routing import (
+    RouteInfo,
+    _ping_host,
+    check_routing,
+    get_routes,
+    local_ipv4_networks,
+)
 from netdiag.findings import Severity
 from netdiag.platform import OSInfo
 
 MAC = OSInfo("Darwin", "test", "arm64")
 LINUX = OSInfo("Linux", "test", "x86_64")
+
+
+def test_ping_summary_canonicalizes_realistic_multiline_output() -> None:
+    output = (
+        "PING gateway (192.168.1.1): 56 data bytes\n"
+        "--- gateway ping statistics ---\n"
+        "3 packets transmitted, 3 packets received, 0.0% packet loss\n"
+        "round-trip min/avg/max/stddev = 1.000/2.000/3.000/0.500 ms\n"
+    )
+    completed = subprocess.CompletedProcess(["ping"], 0, stdout=output, stderr="")
+
+    with (
+        patch("netdiag.checks.routing.which", return_value="/sbin/ping"),
+        patch("netdiag.checks.routing.run", return_value=completed),
+    ):
+        ok, summary = _ping_host("192.168.1.1")
+
+    assert ok is True
+    assert summary == (
+        r"--- gateway ping statistics ---\n"
+        r"3 packets transmitted, 3 packets received, 0.0% packet loss\n"
+        r"round-trip min/avg/max/stddev = 1.000/2.000/3.000/0.500 ms"
+    )
+    assert "\n" not in summary
+
+
+def test_ping_summary_visibly_escapes_malicious_controls_and_remains_bounded() -> None:
+    output = "gateway\n\x1b[31mspoof\x00\x7f\x85\u202ereversed\t" + ("\x1b" * 1000)
+    completed = subprocess.CompletedProcess(["ping"], 1, stdout=output, stderr="")
+
+    with (
+        patch("netdiag.checks.routing.which", return_value="/sbin/ping"),
+        patch("netdiag.checks.routing.run", return_value=completed),
+    ):
+        ok, summary = _ping_host("192.168.1.1")
+
+    assert ok is False
+    assert not any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in summary)
+    assert all(separator not in summary for separator in ("\n", "\r", "\u2028", "\u2029"))
+    assert all(marker in summary for marker in (r"\n", r"\x1b", r"\x00", r"\x7f", r"\u202e", r"\t"))
+    assert len(summary) <= 4096
 
 
 def test_macos_route_and_netmask_parsing():

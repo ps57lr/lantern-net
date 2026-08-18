@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import subprocess
 import threading
 from concurrent.futures import Future
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,6 +18,7 @@ from netdiag.application import (
     ScanAlreadyRunning,
 )
 from netdiag.catalog import make_finding
+from netdiag.checks.routing import Interface, RouteInfo, check_routing
 from netdiag.consent import DiagnosticGoal, issue_consent
 from netdiag.core import ActivityLevel, CancellationToken, ScanPolicy
 from netdiag.core.status import ConfidenceLevel, ExecutionStatus, OutcomeStatus
@@ -688,6 +691,96 @@ def test_local_service_passive_profile_never_calls_network_capable_collectors() 
         ("lan", False, 256),
     ]
     assert service.snapshot()["transport"] == "loopback"
+
+
+def test_passive_application_boundary_keeps_packet_capable_collectors_dark() -> None:
+    fake = FakeCollectors()
+    network_calls: list[str] = []
+
+    def forbidden(name: str):
+        def call(*_args, **_kwargs):
+            network_calls.append(name)
+            raise AssertionError(f"passive run invoked {name}")
+
+        return call
+
+    base = fake.bundle()
+    collectors = ScanCollectors(
+        detect_platform=base.detect_platform,
+        routing=base.routing,
+        dns=forbidden("dns"),
+        wifi=base.wifi,
+        lan=base.lan,
+        mdns=forbidden("mdns"),
+        ports=forbidden("ports"),
+        active_ping=forbidden("active_ping"),
+    )
+    controller = DiagnosticController(collectors=collectors, executor=ImmediateExecutor())
+    service = LocalDiagnosticService(controller)
+
+    service.start({"goal": "network", "profile": "passive", "include_mdns": False})
+    snapshot = service.snapshot()
+
+    assert network_calls == []
+    assert fake.calls == [
+        "platform",
+        ("routing", False),
+        "wifi",
+        ("lan", False, 256),
+    ]
+    assert snapshot["state"] == "completed"
+    assert snapshot["assessment"]["coverage"] == "partial"
+
+
+def test_realistic_multiline_ping_reaches_completed_application_viewmodel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    route_info = RouteInfo(
+        "192.168.50.1",
+        "en0",
+        [Interface("en0", ["192.168.50.25"], "up", ["192.168.50.0/24"])],
+        True,
+        "ok",
+    )
+    ping_output = (
+        "PING gateway (192.168.50.1): 56 data bytes\n"
+        "--- gateway ping statistics ---\n"
+        "3 packets transmitted, 3 packets received, 0.0% packet loss\n"
+        "round-trip min/avg/max/stddev = 1.000/2.000/3.000/0.500 ms\n"
+    )
+    completed_ping = subprocess.CompletedProcess(
+        ["ping"],
+        0,
+        stdout=ping_output,
+        stderr="",
+    )
+    monkeypatch.setattr("netdiag.checks.routing.get_routes", lambda _osinfo: route_info)
+    monkeypatch.setattr("netdiag.checks.routing.which", lambda _name: "/sbin/ping")
+    monkeypatch.setattr("netdiag.checks.routing.run", lambda *_args, **_kwargs: completed_ping)
+    monkeypatch.setattr(
+        "netdiag.checks.routing.socket.create_connection",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+
+    fake = FakeCollectors()
+    fake.routing = lambda osinfo, probes: check_routing(osinfo, network_probes=probes)
+    controller = DiagnosticController(
+        collectors=fake.bundle(),
+        executor=ImmediateExecutor(),
+    )
+    service = LocalDiagnosticService(controller)
+
+    service.start({"goal": "network", "profile": "low_impact_network", "include_mdns": False})
+    raw_snapshot = controller.snapshot()
+    ui_snapshot = service.snapshot()
+
+    assert raw_snapshot["state"] == "completed"
+    assert raw_snapshot["error"] is None
+    assert raw_snapshot["progress"]["processed"] == 8
+    assert raw_snapshot["progress"]["planned"] == 8
+    assert raw_snapshot["progress"]["percent"] == 100
+    assert ui_snapshot["state"] == "completed"
+    assert ui_snapshot["assessment"]["coverage"] == "partial"
 
 
 def test_local_service_low_impact_profile_never_authorizes_active_lan_ping() -> None:

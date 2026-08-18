@@ -2,7 +2,7 @@
 
 Status: living threat model; original Phase 0 review plus current local checkpoint
 Review date: 2026-08-17
-Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev5`
+Reviewed baseline: `v0.2.1` / `0871248`; current local line: `0.3.0.dev6`
 Applies to: Lantern Core, Portable, local UI, LAN responder, and Rescue
 
 ## Executive decision
@@ -46,9 +46,12 @@ writes, automatic execution, an updater, or a production trust claim.
 
 The immutable dev4 family beta passed clean-build, Developer ID signing, Apple
 notarization, stapling, independent verification, and local opening gates, but it
-exposed a Safari foreground usability defect. Dev5 corrects that launch behavior
-and must independently repeat the full clean-build, signing, notarization, stapling,
-verification, Gatekeeper, and Finder-opening gates before handoff. Either artifact
+exposed a Safari foreground usability defect. The untagged, non-distributed dev5
+candidate corrected foregrounding, but signed Finder low-impact smoke exposed the
+inherited multiline gateway-ping serialization failure. Dev6 combines the launch
+and safe canonical ping-serialization corrections and must independently repeat the
+full clean-build, signing, notarization, stapling, verification, Gatekeeper,
+Finder-opening, and low-impact smoke gates before handoff. Any passing artifact
 remains a limited family beta rather than production software.
 
 ### Original baseline (historical)

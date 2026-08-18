@@ -1,10 +1,11 @@
 # Authorized network assessment evolution
 
-Status: design contract. `0.3.0.dev5` corrects macOS browser foregrounding but
-includes only a disabled, offline engagement envelope and coverage-planning
-foundation; business, municipal, regulated, organization-wide scanning, evidence,
-and assurance features remain unavailable. Packaging and launch work do not enable
-an enterprise assessment capability or compliance claim.
+Status: design contract. `0.3.0.dev6` corrects macOS browser foregrounding and
+gateway-ping evidence serialization but includes only a disabled, offline engagement
+envelope and coverage-planning foundation; business, municipal, regulated,
+organization-wide scanning, evidence, and assurance features remain unavailable.
+Packaging, launch, and serialization work do not enable an enterprise assessment
+capability or compliance claim.
 
 Lantern's local diagnostic core can grow into an assessment product, but a larger
 scan is not automatically a better assessment. The enterprise product must combine
