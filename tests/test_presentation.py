@@ -715,6 +715,17 @@ def test_passive_routing_truth_fields_survive_registered_serialization() -> None
     }
 
 
+@pytest.mark.parametrize("share_safe", [False, True])
+def test_gateway_ping_output_still_rejects_raw_control_characters(share_safe: bool) -> None:
+    with pytest.raises(ValueError, match="gateway_ping.output contains control characters"):
+        serialize_command_result(
+            [],
+            {"gateway_ping": {"ok": True, "output": "line one\nline two\x1b[31m"}},
+            category="routing",
+            share_safe=share_safe,
+        )
+
+
 def test_registered_finding_constructor_bypass_is_rejected_before_rendering():
     bypass = Finding(
         Severity.INFO,

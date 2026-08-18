@@ -59,12 +59,12 @@ class _FakeUIServer:
         self.events.append("server.close")
 
 
-def test_cli_reports_dev5_version(capsys):
+def test_cli_reports_dev6_version(capsys):
     with pytest.raises(SystemExit) as exited:
         cli.main(["--version"])
 
     assert exited.value.code == 0
-    assert capsys.readouterr().out == "netdiag 0.3.0.dev5\n"
+    assert capsys.readouterr().out == "netdiag 0.3.0.dev6\n"
 
 
 def test_lan_json_serializes_severity(monkeypatch, capsys):

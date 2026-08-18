@@ -12,6 +12,11 @@ from netdiag.catalog import make_finding
 from netdiag.core.status import ConfidenceLevel, OutcomeStatus
 from netdiag.findings import Finding, Severity
 from netdiag.platform import OSInfo, first_match, run, run_ok, which
+from netdiag.terminal import terminal_safe
+
+# ``terminal_safe`` can expand one source character to a ten-character escape.
+# This leaves headroom under the report validator's 4,096-character field cap.
+_PING_SUMMARY_SOURCE_CHARS = 384
 
 
 @dataclass
@@ -38,10 +43,17 @@ def _ping_host(host: str, count: int = 3) -> tuple[bool, str]:
             cp = run(["ping", flag, str(count), host], timeout=count * 3 + 5)
             ok = cp.returncode == 0
             summary = (cp.stdout or cp.stderr or "").splitlines()[-3:]
-            return ok, "\n".join(summary)
+            return ok, _canonical_ping_summary("\n".join(summary))
         except (subprocess.SubprocessError, OSError) as exc:
-            return False, str(exc)
+            return False, _canonical_ping_summary(str(exc))
     return False, "ping not found"
+
+
+def _canonical_ping_summary(value: object) -> str:
+    """Return one bounded line with every control character visibly escaped."""
+
+    rendered = terminal_safe(value, max_chars=_PING_SUMMARY_SOURCE_CHARS)
+    return " ".join(rendered.split())
 
 
 def get_routes(osinfo: OSInfo) -> RouteInfo:

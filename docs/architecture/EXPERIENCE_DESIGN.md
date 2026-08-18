@@ -2,7 +2,7 @@
 
 Status: implemented local development foundation plus explicitly future designs
 
-Current local checkpoint: `netdiag` `0.3.0.dev5`; original baseline: v0.2.1 (`0871248`)
+Current local checkpoint: `netdiag` `0.3.0.dev6`; original baseline: v0.2.1 (`0871248`)
 
 Applies to: local UI, portable builds, LAN responder, and rescue workflows
 
@@ -436,7 +436,7 @@ view from the run ID stored in an HttpOnly session, not from browser-local evide
   when added, belongs in a minimal separately reviewed helper with action-specific
   messages.
 
-Current local endpoints in `0.3.0.dev5`:
+Current local endpoints in `0.3.0.dev6`:
 
 ```text
 GET  /app/                    static app shell and allowlisted assets
@@ -514,9 +514,12 @@ or changes host configuration merely because it runs from removable media.
 
 The immutable dev4 family beta passed signing, notarization, stapling, independent
 verification, and local launch gates, but its local page can open in Safari behind
-other windows. Dev5 corrects that foreground-launch behavior and is not a family
-handoff until a fresh artifact passes every release and clean-machine gate. Passing
-those gates makes it a limited family beta, not a production release.
+other windows. The untagged, non-distributed dev5 candidate corrected foreground
+launching, but signed Finder low-impact smoke exposed the inherited multiline
+gateway-ping serialization failure. Dev6 combines the foreground and safe canonical
+ping-serialization corrections and is not a family handoff until a fresh artifact
+passes every release, Finder-opening, low-impact smoke, and clean-machine gate.
+Passing those gates makes it a limited family beta, not a production release.
 
 ### Build inputs and outputs
 
