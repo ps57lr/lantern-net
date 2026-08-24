@@ -4,17 +4,23 @@ on:
   push:
     branches: [master]
   pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   python:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -44,6 +50,7 @@ jobs:
           git diff --check
 
   wheel:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: Build and inspect wheel
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -80,6 +87,7 @@ jobs:
           PY
 
   browser:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: Synthetic local browser acceptance
     runs-on: ubuntu-24.04
     timeout-minutes: 20
