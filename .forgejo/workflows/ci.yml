@@ -1,0 +1,155 @@
+# Rack execution of existing checks. GitHub workflows are preserved.
+name: "Rack \xB7 CI"
+'on':
+  push:
+    branches:
+    - master
+    - migration/rack-ci-20260918
+  pull_request:
+    types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
+  workflow_dispatch: {}
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  python:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: Python ${{ matrix.python-version }}
+    runs-on: garnet-arm64
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - '3.10'
+        - '3.11'
+        - '3.14'
+    steps:
+    - name: Check out reviewed source
+      uses: https://github.com/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        persist-credentials: false
+    - name: Select Python
+      uses: https://github.com/actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install project test dependencies
+      run: python -m pip install --disable-pip-version-check --no-input -e ".[dev]"
+    - name: Run tests
+      run: python -m pytest
+    - name: Check source and formatting
+      if: matrix.python-version == '3.11'
+      run: 'python -m ruff check .
+
+        python -m ruff format --check .
+
+        git diff --check
+
+        '
+  wheel:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: Build and inspect wheel
+    runs-on: garnet-arm64
+    timeout-minutes: 10
+    steps:
+    - name: Check out reviewed source
+      uses: https://github.com/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        persist-credentials: false
+    - name: Select Python
+      uses: https://github.com/actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      with:
+        python-version: '3.11'
+    - name: Install the declared build backend
+      run: python -m pip install --disable-pip-version-check --no-input "setuptools==80.9.0"
+    - name: Build without resolving runtime dependencies
+      run: python -m pip wheel --disable-pip-version-check --no-input --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/lantern-wheels"
+        .
+    - name: Install and verify the isolated wheel
+      run: 'wheel_path="$(find "$RUNNER_TEMP/lantern-wheels" -maxdepth 1 -type f -name ''netdiag-*.whl'' -print -quit)"
+
+        test -n "$wheel_path"
+
+        python -m venv "$RUNNER_TEMP/lantern-wheel-smoke"
+
+        "$RUNNER_TEMP/lantern-wheel-smoke/bin/python" -m pip install --disable-pip-version-check --no-input --no-index --no-deps "$wheel_path"
+
+        "$RUNNER_TEMP/lantern-wheel-smoke/bin/netdiag" --version
+
+        "$RUNNER_TEMP/lantern-wheel-smoke/bin/netdiag" ui --help
+
+        "$RUNNER_TEMP/lantern-wheel-smoke/bin/python" - <<''PY''
+
+        import json
+
+        from importlib.resources import files
+
+
+        from netdiag.ui.assets import verify_asset_manifest
+
+
+        verify_asset_manifest()
+
+        schema = files("netdiag.schemas").joinpath("report-1.1.schema.json")
+
+        assert json.loads(schema.read_text(encoding="utf-8"))["$schema"].endswith("2020-12/schema")
+
+        PY
+
+        '
+  browser:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: Synthetic local browser acceptance
+    runs-on: garnet-arm64
+    timeout-minutes: 20
+    steps:
+    - name: Check out reviewed source
+      uses: https://github.com/actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        persist-credentials: false
+    - name: Select Python
+      uses: https://github.com/actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+      with:
+        python-version: '3.11'
+    - name: Select Node
+      uses: https://github.com/actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      with:
+        node-version: '24'
+    - name: Install Lantern without diagnostic side effects
+      run: python -m pip install --disable-pip-version-check --no-input --no-deps -e .
+    - name: Install locked browser-test dependencies without package scripts
+      run: npm ci --ignore-scripts --no-audit --no-fund
+    - name: Install only the reviewed browser engine
+      run: npx --no-install playwright install --with-deps chromium
+    - name: Exercise the synthetic loopback-only first-run flow
+      env:
+        LANTERN_PYTHON: python
+        PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/lantern-browser-results
+      run: npm run test:browser
+    - name: Build and isolate the exact wheel for browser acceptance
+      run: 'python -m pip install --disable-pip-version-check --no-input "setuptools==80.9.0"
+
+        python -m pip wheel --disable-pip-version-check --no-input --no-deps --no-build-isolation --wheel-dir "$RUNNER_TEMP/lantern-browser-wheels"
+        .
+
+        wheel_path="$(find "$RUNNER_TEMP/lantern-browser-wheels" -maxdepth 1 -type f -name ''netdiag-*.whl'' -print -quit)"
+
+        test -n "$wheel_path"
+
+        python -m venv "$RUNNER_TEMP/lantern-browser-wheel"
+
+        "$RUNNER_TEMP/lantern-browser-wheel/bin/python" -m pip install --disable-pip-version-check --no-input --no-index --no-deps "$wheel_path"
+
+        '
+    - name: Exercise the installed wheel through the same browser matrix
+      env:
+        LANTERN_INSTALLED_PACKAGE: '1'
+        LANTERN_PYTHON: ${{ runner.temp }}/lantern-browser-wheel/bin/python
+        PLAYWRIGHT_OUTPUT_DIR: ${{ runner.temp }}/lantern-wheel-browser-results
+      run: npm run test:browser
